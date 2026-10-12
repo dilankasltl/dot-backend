@@ -605,13 +605,64 @@ app.get('/api/analytics', async (req, res) => {
 
     const chartData = Object.values(departmentStats);
 
+    // EPF Number-Wise Stats aggregation
+    const epfMap = {};
+    requests.forEach(req => {
+      if (req.employees && Array.isArray(req.employees)) {
+        req.employees.forEach(emp => {
+          const epfNo = String(emp.epfNo || '').trim();
+          const fullName = String(emp.fullName || '').trim();
+          const dept = req.department;
+          const key = `${epfNo}_${dept}`;
+
+          if (!epfMap[key]) {
+            epfMap[key] = {
+              epfNo,
+              fullName,
+              department: dept,
+              totalCount: 0,
+              approvedCount: 0,
+              pendingCount: 0,
+              rejectedCount: 0,
+              totalHours: 0,
+              dates: []
+            };
+          }
+
+          epfMap[key].totalCount += 1;
+          epfMap[key].totalHours += Number(req.hours || 4);
+          if (req.date && !epfMap[key].dates.includes(req.date)) {
+            epfMap[key].dates.push(req.date);
+          }
+
+          if (req.status === 'APPROVED') {
+            epfMap[key].approvedCount += 1;
+          } else if (req.status === 'REJECTED') {
+            epfMap[key].rejectedCount += 1;
+          } else {
+            epfMap[key].pendingCount += 1;
+          }
+        });
+      }
+    });
+
+    const epfStats = Object.values(epfMap).sort((a, b) => {
+      if (b.totalCount !== a.totalCount) return b.totalCount - a.totalCount;
+      const numA = parseInt(a.epfNo, 10);
+      const numB = parseInt(b.epfNo, 10);
+      if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
+      return a.epfNo.localeCompare(b.epfNo);
+    });
+
     res.json({
       chartData,
+      epfStats,
       summary: {
         totalRequests,
         totalHeadcountRequested,
         totalHeadcountApproved,
         totalHeadcountPending,
+        uniqueEmployeesCount: epfStats.length,
         pendingL1Count: requests.filter(r => r.status === 'PENDING_L1').length,
         pendingFinalCount: requests.filter(r => r.status === 'PENDING_FINAL').length,
         approvedCount: requests.filter(r => r.status === 'APPROVED').length,
