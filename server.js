@@ -97,7 +97,10 @@ app.post('/api/auth/reset-password', async (req, res) => {
 
 app.get('/api/auth/users', async (req, res) => {
   try {
-    const users = await User.find({}, '-password').sort({ role: 1, department: 1 });
+    const users = await User.find(
+      { username: { $ne: 'Admin' }, role: { $ne: 'admin' } },
+      '-password'
+    ).sort({ role: 1, department: 1, name: 1 });
     res.json(users);
   } catch (err) {
     res.status(500).json({ error: err.message });
