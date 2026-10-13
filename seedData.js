@@ -153,6 +153,16 @@ const usersData = [
     role: 'approver_final',
     canViewAllPending: true,
     canViewCharts: true
+  },
+
+  // Group 4: System Administrator
+  {
+    username: 'Admin',
+    password: 'Admin@123',
+    name: 'Administrator',
+    role: 'admin',
+    canViewAllPending: true,
+    canViewCharts: true
   }
 ];
 

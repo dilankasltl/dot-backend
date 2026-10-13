@@ -104,6 +104,261 @@ app.get('/api/auth/users', async (req, res) => {
   }
 });
 
+// --- Admin Management Routes ---
+// 1. Get all users with full configuration
+app.get('/api/admin/users', async (req, res) => {
+  try {
+    const users = await User.find({}).sort({ role: 1, department: 1, username: 1 });
+    res.json(users);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 2. Get all HODs (Level 1 Approvers)
+app.get('/api/admin/hods', async (req, res) => {
+  try {
+    const hods = await User.find({ role: 'approver_l1' }).sort({ name: 1 });
+    res.json(hods);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 3. Create a new User (Requester or HOD, with optional inline HOD creation)
+app.post('/api/admin/users', async (req, res) => {
+  try {
+    const {
+      username,
+      password,
+      name,
+      role,
+      department,
+      assignedL1Approver,
+      approvedDepartments,
+      createHODInline,
+      hodUsername,
+      hodPassword,
+      hodName
+    } = req.body;
+
+    if (!username || !password || !name || !role) {
+      return res.status(400).json({ error: 'Username, password, name, and role are required' });
+    }
+
+    const existing = await User.findOne({ username: username.trim() });
+    if (existing) {
+      return res.status(400).json({ error: `Username '${username}' already exists.` });
+    }
+
+    let finalAssignedL1 = assignedL1Approver ? assignedL1Approver.trim() : '';
+
+    // Handle creating HOD inline when creating a requester
+    if (role === 'requester' && createHODInline) {
+      if (!hodUsername || !hodPassword || !hodName) {
+        return res.status(400).json({ error: 'HOD Username, Password, and Full Name are required for inline HOD creation.' });
+      }
+
+      const existingHod = await User.findOne({ username: hodUsername.trim() });
+      if (existingHod) {
+        return res.status(400).json({ error: `HOD Username '${hodUsername}' already exists.` });
+      }
+
+      const formattedHodName = hodName.trim().startsWith('Mr.') ? hodName.trim() : `Mr. ${hodName.trim()}`;
+      const newHod = await User.create({
+        username: hodUsername.trim(),
+        password: hodPassword.trim(),
+        defaultPassword: hodPassword.trim(),
+        name: formattedHodName,
+        role: 'approver_l1',
+        approvedDepartments: department ? [department.trim()] : [],
+        canViewAllPending: false,
+        canViewCharts: true
+      });
+
+      finalAssignedL1 = newHod.name;
+    }
+
+    const formattedName = (name.trim().startsWith('Mr.') || role === 'admin')
+      ? name.trim()
+      : `Mr. ${name.trim()}`;
+
+    let newUser;
+    if (role === 'requester') {
+      if (!department) {
+        return res.status(400).json({ error: 'Department is required for Requesters' });
+      }
+
+      newUser = await User.create({
+        username: username.trim(),
+        password: password.trim(),
+        defaultPassword: password.trim(),
+        name: formattedName,
+        role: 'requester',
+        department: department.trim(),
+        assignedL1Approver: finalAssignedL1,
+      });
+
+      // Ensure the department is registered in the assigned HOD's approvedDepartments
+      if (finalAssignedL1) {
+        await User.updateOne(
+          { $or: [{ name: finalAssignedL1 }, { username: finalAssignedL1 }] },
+          { $addToSet: { approvedDepartments: department.trim() } }
+        );
+      }
+    } else if (role === 'approver_l1') {
+      const depts = Array.isArray(approvedDepartments)
+        ? approvedDepartments
+        : (approvedDepartments ? approvedDepartments.split(',').map(d => d.trim()).filter(Boolean) : []);
+
+      newUser = await User.create({
+        username: username.trim(),
+        password: password.trim(),
+        defaultPassword: password.trim(),
+        name: formattedName,
+        role: 'approver_l1',
+        approvedDepartments: depts,
+        canViewAllPending: false,
+        canViewCharts: true
+      });
+    } else {
+      newUser = await User.create({
+        username: username.trim(),
+        password: password.trim(),
+        defaultPassword: password.trim(),
+        name: formattedName,
+        role: role,
+        department: department ? department.trim() : '',
+        canViewAllPending: true,
+        canViewCharts: true
+      });
+    }
+
+    res.status(201).json({ message: 'User created successfully', user: newUser });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 4. Update user
+app.put('/api/admin/users/:id', async (req, res) => {
+  try {
+    const { name, password, department, assignedL1Approver, approvedDepartments } = req.body;
+    const user = await User.findById(req.params.id);
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (name) {
+      user.name = (name.trim().startsWith('Mr.') || user.role === 'admin')
+        ? name.trim()
+        : `Mr. ${name.trim()}`;
+    }
+
+    if (password) {
+      user.password = password.trim();
+      user.defaultPassword = password.trim();
+    }
+
+    if (user.role === 'requester') {
+      if (department) user.department = department.trim();
+      if (assignedL1Approver) {
+        user.assignedL1Approver = assignedL1Approver.trim();
+        await User.updateOne(
+          { $or: [{ name: user.assignedL1Approver }, { username: user.assignedL1Approver }] },
+          { $addToSet: { approvedDepartments: user.department } }
+        );
+      }
+    } else if (user.role === 'approver_l1') {
+      if (approvedDepartments) {
+        user.approvedDepartments = Array.isArray(approvedDepartments)
+          ? approvedDepartments
+          : approvedDepartments.split(',').map(d => d.trim()).filter(Boolean);
+      }
+    }
+
+    await user.save();
+    res.json({ message: 'User updated successfully', user });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 5. Delete user
+app.delete('/api/admin/users/:id', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (user.username === 'Admin') {
+      return res.status(400).json({ error: 'The Administrator account cannot be deleted.' });
+    }
+
+    await User.findByIdAndDelete(req.params.id);
+    res.json({ message: `User '${user.name}' deleted successfully.` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 6. Admin Request Data Management: List all requests
+app.get('/api/admin/requests', async (req, res) => {
+  try {
+    const { department, username, status, date } = req.query;
+    let query = {};
+    if (department && department !== 'ALL') query.department = department;
+    if (username && username !== 'ALL') query.requesterUsername = username;
+    if (status && status !== 'ALL') query.status = status;
+    if (date) query.date = date;
+
+    const requests = await DotRequest.find(query).sort({ createdAt: -1 });
+    res.json(requests);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 7. Admin Delete Requests: Delete single request permanently
+app.delete('/api/admin/requests/:id', async (req, res) => {
+  try {
+    const deleted = await DotRequest.findByIdAndDelete(req.params.id);
+    if (!deleted) {
+      return res.status(404).json({ error: 'Request not found' });
+    }
+    res.json({ message: `Request ${deleted.reqNumber} permanently deleted.` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 8. Admin Bulk Delete Requests: Clear ALL requests or filter by department/user
+app.delete('/api/admin/requests', async (req, res) => {
+  try {
+    const { department, username, all } = req.query;
+    let filter = {};
+
+    if (all === 'true' || (!department && !username)) {
+      const result = await DotRequest.deleteMany({});
+      return res.json({
+        message: `All Double OT data deleted successfully (${result.deletedCount} requests removed). Tables and charts are reset.`
+      });
+    }
+
+    if (department) filter.department = department;
+    if (username) filter.requesterUsername = username;
+
+    const result = await DotRequest.deleteMany(filter);
+    res.json({
+      message: `Deleted ${result.deletedCount} requests matching criteria.`
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // --- Employee Master Routes ---
 app.get('/api/employees', async (req, res) => {
   try {
