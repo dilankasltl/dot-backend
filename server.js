@@ -503,7 +503,7 @@ app.post('/api/requests', async (req, res) => {
       requesterName: user.name,
       department: user.department,
       date: date || new Date().toISOString().split('T')[0],
-      shift: shift || 'Day',
+      shift: shift || 'SHIFT A',
       hours: hours || 4,
       reason: reason || 'Production Double OT',
       employees: employees.map(e => ({ epfNo: e.epfNo, fullName: e.fullName })),
