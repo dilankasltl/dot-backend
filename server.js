@@ -379,6 +379,101 @@ app.get('/api/employees', async (req, res) => {
   }
 });
 
+// Admin Employee Management: Get all employees
+app.get('/api/admin/employees', async (req, res) => {
+  try {
+    const search = req.query.search ? req.query.search.trim() : '';
+    let query = {};
+    if (search) {
+      query = {
+        $or: [
+          { epfNo: { $regex: search, $options: 'i' } },
+          { fullName: { $regex: search, $options: 'i' } }
+        ]
+      };
+    }
+    const employees = await Employee.find(query).sort({ epfNo: 1 }).limit(500);
+    const totalCount = await Employee.countDocuments();
+    res.json({ employees, totalCount });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin Employee Management: Add new employee (EPF No + Full Name)
+app.post('/api/admin/employees', async (req, res) => {
+  try {
+    const { epfNo, fullName, department } = req.body;
+    if (!epfNo || !fullName) {
+      return res.status(400).json({ error: 'Both EPF Number and Full Name are required' });
+    }
+
+    const cleanEpf = String(epfNo).trim();
+    const cleanName = fullName.trim();
+
+    const existing = await Employee.findOne({ epfNo: cleanEpf });
+    if (existing) {
+      return res.status(400).json({
+        error: `Employee with EPF #${cleanEpf} already exists (${existing.fullName}).`
+      });
+    }
+
+    const newEmp = await Employee.create({
+      epfNo: cleanEpf,
+      fullName: cleanName,
+      department: department ? department.trim() : 'General'
+    });
+
+    res.status(201).json({
+      message: `Employee #${cleanEpf} (${cleanName}) added successfully! Ready for Double OT search.`,
+      employee: newEmp
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin Employee Management: Update employee
+app.put('/api/admin/employees/:id', async (req, res) => {
+  try {
+    const { epfNo, fullName, department } = req.body;
+    const emp = await Employee.findById(req.params.id);
+    if (!emp) {
+      return res.status(404).json({ error: 'Employee not found' });
+    }
+
+    if (epfNo) {
+      const cleanEpf = String(epfNo).trim();
+      const existing = await Employee.findOne({ epfNo: cleanEpf, _id: { $ne: req.params.id } });
+      if (existing) {
+        return res.status(400).json({ error: `EPF #${cleanEpf} already belongs to another employee (${existing.fullName})` });
+      }
+      emp.epfNo = cleanEpf;
+    }
+
+    if (fullName) emp.fullName = fullName.trim();
+    if (department) emp.department = department.trim();
+
+    await emp.save();
+    res.json({ message: 'Employee updated successfully', employee: emp });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin Employee Management: Delete employee
+app.delete('/api/admin/employees/:id', async (req, res) => {
+  try {
+    const emp = await Employee.findByIdAndDelete(req.params.id);
+    if (!emp) {
+      return res.status(404).json({ error: 'Employee not found' });
+    }
+    res.json({ message: `Employee #${emp.epfNo} (${emp.fullName}) deleted successfully` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // --- DOT Requests Routes ---
 
 // Create new DOT request
