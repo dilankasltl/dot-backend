@@ -98,7 +98,9 @@ const usersData = [
     password: 'Dhammika@123',
     name: 'Mr. Dhammika',
     role: 'approver_l1',
-    approvedDepartments: ['Production', 'WIP', 'RIM', 'FGS', 'Mixing/Bandroom']
+    approvedDepartments: ['Production', 'WIP', 'RIM', 'FGS', 'Mixing/Bandroom'],
+    canViewAllPending: true,
+    canViewCharts: true
   },
   {
     username: 'Karthika',
@@ -161,6 +163,24 @@ const usersData = [
     password: 'Admin@123',
     name: 'Administrator',
     role: 'admin',
+    canViewAllPending: true,
+    canViewCharts: true
+  },
+
+  // Group 5: Company Monitors / Viewers (Full plant-wide monitoring, non-approver, non-requester)
+  {
+    username: 'Nimesh',
+    password: 'Nimesh@123',
+    name: 'Mr. Nimesh',
+    role: 'viewer',
+    canViewAllPending: true,
+    canViewCharts: true
+  },
+  {
+    username: 'Niranjan',
+    password: 'Niranjan@123',
+    name: 'Mr. Niranjan',
+    role: 'viewer',
     canViewAllPending: true,
     canViewCharts: true
   }

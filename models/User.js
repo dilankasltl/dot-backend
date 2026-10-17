@@ -8,7 +8,7 @@ const userSchema = new mongoose.Schema({
   role: { 
     type: String, 
     required: true, 
-    enum: ['requester', 'approver_l1', 'approver_final', 'admin'] 
+    enum: ['requester', 'approver_l1', 'approver_final', 'admin', 'viewer'] 
   },
   department: { type: String, default: '' },
   // For requesters: which L1 approver receives their requests

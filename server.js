@@ -658,47 +658,63 @@ app.get('/api/requests', async (req, res) => {
     }
 
     if (user.role === 'approver_l1') {
-      if (user.username === 'Rohitha') {
-        const actionable = await DotRequest.find({
-          department: 'HR',
-          status: 'PENDING_L1',
-          isDeleted: false,
-          hiddenForUsers: { $ne: user.username }
-        }).sort({ createdAt: -1 });
+      const isRohitha = user.username === 'Rohitha';
+      const isDhammika = user.username === 'Dhammika';
+      const canViewAll = user.canViewAllPending || isDhammika || isRohitha;
 
-        const allPending = await DotRequest.find({
+      const actionableQuery = {
+        status: 'PENDING_L1',
+        isDeleted: false,
+        hiddenForUsers: { $ne: user.username }
+      };
+
+      if (isRohitha) {
+        actionableQuery.department = 'HR';
+      } else {
+        actionableQuery.department = { $in: user.approvedDepartments || [] };
+      }
+
+      const actionable = await DotRequest.find(actionableQuery).sort({ createdAt: -1 });
+
+      let allPending = [];
+      if (canViewAll) {
+        allPending = await DotRequest.find({
           status: { $in: ['PENDING_L1', 'PENDING_FINAL'] },
           isDeleted: false,
           hiddenForUsers: { $ne: user.username }
         }).sort({ createdAt: -1 });
-
-        const historyQuery = buildDateQuery();
-        const allRequests = await DotRequest.find(historyQuery).sort({ date: -1, createdAt: -1 });
-
-        return res.json({
-          requests: allRequests,
-          actionable,
-          allPending,
-          type: 'rohitha_l1'
-        });
       }
 
-      // Other L1 Approvers (Mr. Dhammika, Mr. Karthika, etc.)
-      const depts = user.approvedDepartments || [];
-      const actionable = await DotRequest.find({
-        department: { $in: depts },
-        status: 'PENDING_L1',
-        isDeleted: false,
-        hiddenForUsers: { $ne: user.username }
-      }).sort({ createdAt: -1 });
+      const historyQuery = canViewAll
+        ? buildDateQuery()
+        : buildDateQuery({ department: { $in: user.approvedDepartments || [] } });
 
-      const deptQuery = buildDateQuery({ department: { $in: depts } });
-      const requests = await DotRequest.find(deptQuery).sort({ date: -1, createdAt: -1 });
+      const requests = await DotRequest.find(historyQuery).sort({ date: -1, createdAt: -1 });
 
       return res.json({
         requests,
         actionable,
-        type: 'standard_l1'
+        allPending,
+        type: isRohitha ? 'rohitha_l1' : (canViewAll ? 'dhammika_l1' : 'standard_l1')
+      });
+    }
+
+    if (user.role === 'viewer') {
+      // Plant-wide Live Monitoring & Read-Only Audit (Mr. Nimesh, Mr. Niranjan)
+      const allPending = await DotRequest.find({
+        status: { $in: ['PENDING_L1', 'PENDING_FINAL'] },
+        isDeleted: false,
+        hiddenForUsers: { $ne: user.username }
+      }).sort({ createdAt: -1 });
+
+      const historyQuery = buildDateQuery();
+      const allRequests = await DotRequest.find(historyQuery).sort({ date: -1, createdAt: -1 });
+
+      return res.json({
+        requests: allRequests,
+        actionable: [],
+        allPending,
+        type: 'viewer'
       });
     }
 
@@ -745,7 +761,9 @@ app.post('/api/requests/:id/l1-action', async (req, res) => {
     }
 
     const user = await User.findOne({ username });
-    if (!user) return res.status(404).json({ error: 'Approver user not found' });
+    if (!user || user.role !== 'approver_l1') {
+      return res.status(403).json({ error: 'Only Level 1 Approvers can perform this action' });
+    }
 
     if (user.username === 'Rohitha' && request.department !== 'HR') {
       return res.status(403).json({ error: 'Mr. Rohitha can only approve HR department requests' });
@@ -823,6 +841,7 @@ app.post('/api/requests/batch-action', async (req, res) => {
 
     const user = await User.findOne({ username });
     if (!user) return res.status(404).json({ error: 'User not found' });
+    if (user.role === 'viewer') return res.status(403).json({ error: 'Viewers cannot perform approval actions' });
 
     const updated = [];
     for (const id of ids) {
