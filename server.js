@@ -1275,6 +1275,7 @@ app.get('/api/attendance-audit', async (req, res) => {
 
     const approvedCount = refreshedRecords.filter(r => r.vinodStatus === 'APPROVED').length;
     const pendingCount = refreshedRecords.filter(r => r.vinodStatus === 'PENDING').length;
+    const notApprovedCount = refreshedRecords.filter(r => r.vinodStatus === 'NOT_APPROVED').length;
     const offShiftCount = refreshedRecords.filter(r => 
       r.shiftName && r.shiftName.toLowerCase() === 'off' && String(r.present || '').toLowerCase() === 'yes'
     ).length;
@@ -1302,14 +1303,166 @@ app.get('/api/attendance-audit', async (req, res) => {
   }
 });
 
-// 3. Delete an attendance audit report
+// 3. Delete an entire attendance audit report for a date (removes from all users)
 app.delete('/api/attendance-audit/:reportDate', async (req, res) => {
   try {
     const { reportDate } = req.params;
-    await AttendanceAudit.deleteOne({
-      $or: [{ reportDate }, { rawDateStr: reportDate }]
+    const norm = normalizeDateStr(reportDate);
+    const result = await AttendanceAudit.deleteMany({
+      $or: [
+        { reportDate },
+        { reportDate: norm },
+        { rawDateStr: reportDate },
+        { rawDateStr: norm }
+      ]
     });
-    res.json({ success: true, message: 'Attendance report record removed.' });
+    res.json({ success: true, message: `Attendance report for ${reportDate} deleted successfully for all users.`, deletedCount: result.deletedCount });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 4. Update a single record in an attendance audit report
+app.put('/api/attendance-audit/:reportDate/record/:recordId', async (req, res) => {
+  try {
+    const { reportDate, recordId } = req.params;
+    const { shiftName, present, workHrs, dotReason, department, unit, fullName } = req.body;
+    const norm = normalizeDateStr(reportDate);
+
+    const audit = await AttendanceAudit.findOne({
+      $or: [{ reportDate }, { reportDate: norm }, { rawDateStr: reportDate }, { rawDateStr: norm }]
+    });
+
+    if (!audit) {
+      return res.status(404).json({ error: 'Attendance audit report not found for this date' });
+    }
+
+    const rec = audit.dotRecords.id(recordId);
+    if (!rec) {
+      return res.status(404).json({ error: 'Record not found in this audit' });
+    }
+
+    if (shiftName !== undefined) rec.shiftName = shiftName;
+    if (present !== undefined) rec.present = present;
+    if (workHrs !== undefined) rec.workHrs = Number(workHrs);
+    if (dotReason !== undefined) rec.dotReason = dotReason;
+    if (department !== undefined) rec.department = department;
+    if (unit !== undefined) rec.unit = unit;
+    if (fullName !== undefined) rec.fullName = fullName;
+
+    await audit.save();
+
+    res.json({ success: true, message: 'Record updated successfully', record: rec });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 5. Delete a single employee record from an attendance audit report
+app.delete('/api/attendance-audit/:reportDate/record/:recordId', async (req, res) => {
+  try {
+    const { reportDate, recordId } = req.params;
+    const norm = normalizeDateStr(reportDate);
+
+    const audit = await AttendanceAudit.findOne({
+      $or: [{ reportDate }, { reportDate: norm }, { rawDateStr: reportDate }, { rawDateStr: norm }]
+    });
+
+    if (!audit) {
+      return res.status(404).json({ error: 'Attendance audit report not found for this date' });
+    }
+
+    audit.dotRecords = audit.dotRecords.filter(r => String(r._id) !== String(recordId));
+    audit.dotCount = audit.dotRecords.length;
+    await audit.save();
+
+    res.json({ success: true, message: 'Employee record removed from audit.', remainingCount: audit.dotRecords.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 6. Add a manual employee record to an attendance audit report
+app.post('/api/attendance-audit/:reportDate/record', async (req, res) => {
+  try {
+    const { reportDate } = req.params;
+    const { epfNo, fullName, shiftName, present, workHrs, department, unit, dotReason } = req.body;
+    if (!epfNo) {
+      return res.status(400).json({ error: 'EPF Number is required' });
+    }
+    const norm = normalizeDateStr(reportDate);
+
+    const audit = await AttendanceAudit.findOne({
+      $or: [{ reportDate }, { reportDate: norm }, { rawDateStr: reportDate }, { rawDateStr: norm }]
+    });
+
+    if (!audit) {
+      return res.status(404).json({ error: 'Attendance audit report not found for this date' });
+    }
+
+    // Auto-match name from employee directory if not specified
+    let resolvedName = fullName;
+    if (!resolvedName) {
+      const epfClean = String(parseInt(epfNo, 10) || epfNo);
+      const emp = await Employee.findOne({
+        $or: [{ epfNo: String(epfNo).trim() }, { epfNo: epfClean }]
+      });
+      resolvedName = emp ? emp.fullName : `Employee #${epfNo}`;
+    }
+
+    // Check Vinod approval for this EPF and date
+    const matchingRequests = await DotRequest.find({
+      isDeleted: false,
+      date: { $in: [audit.reportDate, audit.rawDateStr, norm, reportDate].filter(Boolean) }
+    });
+
+    const epfRaw = String(epfNo).trim();
+    const epfClean = String(parseInt(epfRaw, 10) || epfRaw);
+    const epfReqs = matchingRequests.filter(q => 
+      q.employees && q.employees.some(e => {
+        const eNum = String(e.epfNo || '').trim();
+        const eClean = String(parseInt(eNum, 10) || eNum);
+        return eNum === epfRaw || eClean === epfClean || eClean === epfRaw || eNum === epfClean;
+      })
+    );
+
+    let vinodStatus = 'NOT_APPROVED';
+    let vinodReqNumber = '';
+    let vinodReqId = '';
+    const approvedReq = epfReqs.find(q => q.status === 'APPROVED');
+    if (approvedReq) {
+      vinodStatus = 'APPROVED';
+      vinodReqNumber = approvedReq.reqNumber;
+      vinodReqId = String(approvedReq._id);
+    } else {
+      const pendingReq = epfReqs.find(q => q.status === 'PENDING_FINAL' || q.status === 'PENDING_L1');
+      if (pendingReq) {
+        vinodStatus = 'PENDING';
+        vinodReqNumber = pendingReq.reqNumber;
+        vinodReqId = String(pendingReq._id);
+      }
+    }
+
+    const newRecord = {
+      epfNo: epfRaw,
+      fullName: resolvedName,
+      department: department || '',
+      unit: unit || '',
+      shiftName: shiftName || 'Off',
+      present: present || 'Yes',
+      firstDate: reportDate,
+      workHrs: Number(workHrs || 0),
+      dotReason: dotReason || (shiftName?.toLowerCase() === 'off' ? 'Shift = Off (Manual Entry)' : 'Work Hrs >= 19h (Manual Entry)'),
+      vinodStatus,
+      vinodReqNumber,
+      vinodReqId
+    };
+
+    audit.dotRecords.push(newRecord);
+    audit.dotCount = audit.dotRecords.length;
+    await audit.save();
+
+    res.json({ success: true, message: `Employee #${epfNo} (${resolvedName}) added to audit.`, record: newRecord });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
