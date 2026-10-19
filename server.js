@@ -9,6 +9,7 @@ dotenv.config();
 const User = require('./models/User');
 const Employee = require('./models/Employee');
 const DotRequest = require('./models/DotRequest');
+const AttendanceAudit = require('./models/AttendanceAudit');
 const { seedDatabase } = require('./seedData');
 
 const app = express();
@@ -20,7 +21,8 @@ app.use(cors({
   origin: true,
   credentials: true,
 }));
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Connect to MongoDB Atlas & Seed Users/Employees
 mongoose.connect(MONGO_URI)
@@ -1041,6 +1043,259 @@ app.get('/api/analytics', async (req, res) => {
         rejectedCount: requests.filter(r => r.status === 'REJECTED').length,
       }
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- Attendance Audit & Double OT Reconciliation Routes ---
+
+// Helper: normalize date string to YYYY-MM-DD
+function normalizeDateStr(dStr) {
+  if (!dStr) return '';
+  dStr = String(dStr).trim();
+  if (dStr.includes('/')) {
+    const parts = dStr.split('/');
+    if (parts.length === 3) {
+      const month = parts[0].padStart(2, '0');
+      const day = parts[1].padStart(2, '0');
+      const year = parts[2].length === 2 ? `20${parts[2]}` : parts[2];
+      return `${year}-${month}-${day}`;
+    }
+  }
+  return dStr;
+}
+
+// 1. Save parsed attendance records and cross-check against Mr. Vinod approvals
+app.post('/api/attendance-audit/save', async (req, res) => {
+  try {
+    const { reportDate, rawDateStr, uploadedBy, records, totalReportRows } = req.body;
+    if (!reportDate || !Array.isArray(records)) {
+      return res.status(400).json({ error: 'reportDate and records array are required' });
+    }
+
+    const normDate = normalizeDateStr(reportDate);
+    const dateVariants = [reportDate, normDate, rawDateStr].filter(Boolean);
+
+    // Fetch all requests for these date variants to reconcile
+    const matchingRequests = await DotRequest.find({
+      isDeleted: false,
+      date: { $in: dateVariants }
+    });
+
+    // Fetch employees to auto-match official full names
+    const allEmployees = await Employee.find({});
+    const empMap = new Map();
+    allEmployees.forEach(emp => {
+      const epf = String(emp.epfNo).trim();
+      const clean = String(parseInt(epf, 10) || epf);
+      empMap.set(epf, emp.fullName);
+      empMap.set(clean, emp.fullName);
+    });
+
+    const enrichedRecords = records.map(r => {
+      const epfRaw = String(r.epfNo || '').trim();
+      const epfClean = String(parseInt(epfRaw, 10) || epfRaw);
+      
+      // Auto-match Full Name from official Employee directory
+      const matchedName = empMap.get(epfRaw) || empMap.get(epfClean) || r.fullName || 'Unknown';
+
+      // Check Mr. Vinod's approval in DotRequest
+      let vinodStatus = 'NOT_APPROVED';
+      let vinodReqNumber = '';
+      let vinodReqId = '';
+
+      const epfReqs = matchingRequests.filter(q => 
+        q.employees && q.employees.some(e => {
+          const eNum = String(e.epfNo || '').trim();
+          const eClean = String(parseInt(eNum, 10) || eNum);
+          return eNum === epfRaw || eClean === epfClean || eClean === epfRaw || eNum === epfClean;
+        })
+      );
+
+      const approvedReq = epfReqs.find(q => q.status === 'APPROVED');
+      if (approvedReq) {
+        vinodStatus = 'APPROVED';
+        vinodReqNumber = approvedReq.reqNumber;
+        vinodReqId = String(approvedReq._id);
+      } else {
+        const pendingReq = epfReqs.find(q => q.status === 'PENDING_FINAL' || q.status === 'PENDING_L1');
+        if (pendingReq) {
+          vinodStatus = 'PENDING';
+          vinodReqNumber = pendingReq.reqNumber;
+          vinodReqId = String(pendingReq._id);
+        } else {
+          const rejectedReq = epfReqs.find(q => q.status === 'REJECTED');
+          if (rejectedReq) {
+            vinodStatus = 'REJECTED';
+            vinodReqNumber = rejectedReq.reqNumber;
+            vinodReqId = String(rejectedReq._id);
+          }
+        }
+      }
+
+      return {
+        epfNo: epfRaw,
+        fullName: matchedName,
+        department: r.department || '',
+        unit: r.unit || '',
+        shiftName: r.shiftName || '',
+        present: r.present || 'Yes',
+        firstDate: r.firstDate || rawDateStr || normDate,
+        workHrs: Number(r.workHrs || 0),
+        inTime: r.inTime || '',
+        outTime: r.outTime || '',
+        dotReason: r.dotReason || '',
+        vinodStatus,
+        vinodReqNumber,
+        vinodReqId
+      };
+    });
+
+    const saved = await AttendanceAudit.findOneAndUpdate(
+      { reportDate: normDate },
+      {
+        $set: {
+          reportDate: normDate,
+          rawDateStr: rawDateStr || reportDate,
+          uploadedBy: uploadedBy || 'Mr. Nimesh',
+          uploadedAt: new Date(),
+          totalReportRows: Number(totalReportRows || records.length),
+          dotCount: enrichedRecords.length,
+          dotRecords: enrichedRecords
+        }
+      },
+      { upsert: true, new: true }
+    );
+
+    res.json({
+      success: true,
+      message: `Daily Attendance for ${normDate} processed successfully with ${enrichedRecords.length} Double OT incidents.`,
+      audit: saved
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 2. Get attendance audit report by date with dynamic Vinod approval check
+app.get('/api/attendance-audit', async (req, res) => {
+  try {
+    const { date } = req.query;
+    const availableAudits = await AttendanceAudit.find({}, 'reportDate rawDateStr uploadedBy uploadedAt totalReportRows dotCount').sort({ reportDate: -1 });
+    const availableDates = availableAudits.map(a => a.reportDate);
+
+    const targetDate = date ? normalizeDateStr(date) : (availableDates[0] || '');
+
+    if (!targetDate) {
+      return res.json({
+        audit: null,
+        availableDates: [],
+        availableAudits: [],
+        summary: { totalDot: 0, approvedCount: 0, notApprovedCount: 0, pendingCount: 0 }
+      });
+    }
+
+    const audit = await AttendanceAudit.findOne({
+      $or: [{ reportDate: targetDate }, { rawDateStr: targetDate }]
+    });
+
+    if (!audit) {
+      return res.json({
+        audit: null,
+        availableDates,
+        availableAudits,
+        summary: { totalDot: 0, approvedCount: 0, notApprovedCount: 0, pendingCount: 0 }
+      });
+    }
+
+    // Dynamic live check against current DotRequest state in database
+    const matchingRequests = await DotRequest.find({
+      isDeleted: false,
+      date: { $in: [audit.reportDate, audit.rawDateStr, targetDate].filter(Boolean) }
+    });
+
+    const refreshedRecords = audit.dotRecords.map(r => {
+      const epfRaw = String(r.epfNo || '').trim();
+      const epfClean = String(parseInt(epfRaw, 10) || epfRaw);
+
+      const epfReqs = matchingRequests.filter(q => 
+        q.employees && q.employees.some(e => {
+          const eNum = String(e.epfNo || '').trim();
+          const eClean = String(parseInt(eNum, 10) || eNum);
+          return eNum === epfRaw || eClean === epfClean || eClean === epfRaw || eNum === epfClean;
+        })
+      );
+
+      let vinodStatus = 'NOT_APPROVED';
+      let vinodReqNumber = '';
+      let vinodReqId = '';
+
+      const approvedReq = epfReqs.find(q => q.status === 'APPROVED');
+      if (approvedReq) {
+        vinodStatus = 'APPROVED';
+        vinodReqNumber = approvedReq.reqNumber;
+        vinodReqId = String(approvedReq._id);
+      } else {
+        const pendingReq = epfReqs.find(q => q.status === 'PENDING_FINAL' || q.status === 'PENDING_L1');
+        if (pendingReq) {
+          vinodStatus = 'PENDING';
+          vinodReqNumber = pendingReq.reqNumber;
+          vinodReqId = String(pendingReq._id);
+        } else {
+          const rejectedReq = epfReqs.find(q => q.status === 'REJECTED');
+          if (rejectedReq) {
+            vinodStatus = 'REJECTED';
+            vinodReqNumber = rejectedReq.reqNumber;
+            vinodReqId = String(rejectedReq._id);
+          }
+        }
+      }
+
+      return {
+        ...r.toObject(),
+        vinodStatus,
+        vinodReqNumber,
+        vinodReqId
+      };
+    });
+
+    const approvedCount = refreshedRecords.filter(r => r.vinodStatus === 'APPROVED').length;
+    const pendingCount = refreshedRecords.filter(r => r.vinodStatus === 'PENDING').length;
+    const notApprovedCount = refreshedRecords.filter(r => r.vinodStatus === 'NOT_APPROVED').length;
+    const offShiftCount = refreshedRecords.filter(r => r.shiftName && r.shiftName.toLowerCase() === 'off').length;
+    const extendedHoursCount = refreshedRecords.filter(r => r.workHrs >= 19).length;
+
+    res.json({
+      audit: {
+        ...audit.toObject(),
+        dotRecords: refreshedRecords
+      },
+      availableDates,
+      availableAudits,
+      summary: {
+        totalDot: refreshedRecords.length,
+        approvedCount,
+        notApprovedCount,
+        pendingCount,
+        offShiftCount,
+        extendedHoursCount,
+        totalReportRows: audit.totalReportRows
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 3. Delete an attendance audit report
+app.delete('/api/attendance-audit/:reportDate', async (req, res) => {
+  try {
+    const { reportDate } = req.params;
+    await AttendanceAudit.deleteOne({
+      $or: [{ reportDate }, { rawDateStr: reportDate }]
+    });
+    res.json({ success: true, message: 'Attendance report record removed.' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
