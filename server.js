@@ -1251,6 +1251,25 @@ app.post('/api/attendance-audit/save', async (req, res) => {
       // Auto-match Full Name from official Employee directory
       const matchedName = empMap.get(epfRaw) || empMap.get(epfClean) || r.fullName || 'Unknown';
 
+      const shift = String(r.shiftName || '').toLowerCase().trim();
+      const present = String(r.present || '').toLowerCase().trim();
+      const workHrs = Number(r.workHrs || 0);
+
+      const isDot = (shift === 'off' || shift.includes('off')) && (present === 'yes');
+      const is24Hours = workHrs >= 19;
+      let category = 'DOT';
+      let dotReason = r.dotReason;
+      if (isDot && is24Hours) {
+        category = 'BOTH';
+        dotReason = dotReason || 'Off Day & 24 Hours Duty';
+      } else if (isDot) {
+        category = 'DOT';
+        dotReason = dotReason || 'Double OT (Off Day)';
+      } else {
+        category = '24_HRS';
+        dotReason = dotReason || `24 Hours Duty (${workHrs}h)`;
+      }
+
       // Check Mr. Vinod's approval in DotRequest
       let vinodStatus = 'NOT_APPROVED';
       let vinodReqNumber = '';
@@ -1288,20 +1307,26 @@ app.post('/api/attendance-audit/save', async (req, res) => {
       return {
         epfNo: epfRaw,
         fullName: matchedName,
-        department: r.department || '',
-        unit: r.unit || '',
+        department: r.department || 'General',
+        unit: r.unit || 'General',
         shiftName: r.shiftName || '',
         present: r.present || 'Yes',
         firstDate: r.firstDate || rawDateStr || normDate,
-        workHrs: Number(r.workHrs || 0),
+        workHrs: workHrs,
         inTime: r.inTime || '',
         outTime: r.outTime || '',
-        dotReason: r.dotReason || '',
+        dotReason: dotReason,
+        category: category,
+        isDot: isDot,
+        is24Hours: is24Hours,
         vinodStatus,
         vinodReqNumber,
         vinodReqId
       };
     });
+
+    const dotCount = enrichedRecords.filter(r => r.isDot).length;
+    const twentyFourHrsCount = enrichedRecords.filter(r => r.is24Hours).length;
 
     const saved = await AttendanceAudit.findOneAndUpdate(
       { reportDate: normDate },
@@ -1312,7 +1337,9 @@ app.post('/api/attendance-audit/save', async (req, res) => {
           uploadedBy: uploadedBy || 'Mr. Nimesh',
           uploadedAt: new Date(),
           totalReportRows: Number(totalReportRows || records.length),
-          dotCount: enrichedRecords.length,
+          dotCount: dotCount,
+          twentyFourHrsCount: twentyFourHrsCount,
+          totalIncidentsCount: enrichedRecords.length,
           dotRecords: enrichedRecords
         }
       },
@@ -1321,7 +1348,7 @@ app.post('/api/attendance-audit/save', async (req, res) => {
 
     res.json({
       success: true,
-      message: `Daily Attendance for ${normDate} processed successfully with ${enrichedRecords.length} Double OT incidents.`,
+      message: `Daily Attendance for ${normDate} processed successfully: ${dotCount} Double OT (Off Day) and ${twentyFourHrsCount} 24 Hours Duty incidents detected.`,
       audit: saved
     });
   } catch (err) {
@@ -1403,8 +1430,20 @@ app.get('/api/attendance-audit', async (req, res) => {
         }
       }
 
+      const isDot = (String(r.shiftName || '').toLowerCase() === 'off' || String(r.shiftName || '').toLowerCase().includes('off')) && (String(r.present || '').toLowerCase() === 'yes');
+      const is24Hours = Number(r.workHrs || 0) >= 19;
+      let category = r.category;
+      if (!category) {
+        if (isDot && is24Hours) category = 'BOTH';
+        else if (isDot) category = 'DOT';
+        else category = '24_HRS';
+      }
+
       return {
         ...r.toObject(),
+        category,
+        isDot,
+        is24Hours,
         vinodStatus,
         vinodReqNumber,
         vinodReqId
@@ -1414,10 +1453,8 @@ app.get('/api/attendance-audit', async (req, res) => {
     const approvedCount = refreshedRecords.filter(r => r.vinodStatus === 'APPROVED').length;
     const pendingCount = refreshedRecords.filter(r => r.vinodStatus === 'PENDING').length;
     const notApprovedCount = refreshedRecords.filter(r => r.vinodStatus === 'NOT_APPROVED').length;
-    const offShiftCount = refreshedRecords.filter(r => 
-      r.shiftName && r.shiftName.toLowerCase() === 'off' && String(r.present || '').toLowerCase() === 'yes'
-    ).length;
-    const extendedHoursCount = refreshedRecords.filter(r => r.workHrs >= 19).length;
+    const dotCount = refreshedRecords.filter(r => r.isDot || (String(r.shiftName).toLowerCase().includes('off') && String(r.present || '').toLowerCase() === 'yes')).length;
+    const twentyFourHrsCount = refreshedRecords.filter(r => r.is24Hours || Number(r.workHrs || 0) >= 19).length;
 
     res.json({
       audit: {
@@ -1427,12 +1464,14 @@ app.get('/api/attendance-audit', async (req, res) => {
       availableDates,
       availableAudits,
       summary: {
-        totalDot: refreshedRecords.length,
+        totalIncidents: refreshedRecords.length,
+        totalDot: dotCount,
+        twentyFourHrsCount: twentyFourHrsCount,
         approvedCount,
         notApprovedCount,
         pendingCount,
-        offShiftCount,
-        extendedHoursCount,
+        offShiftCount: dotCount,
+        extendedHoursCount: twentyFourHrsCount,
         totalReportRows: audit.totalReportRows
       }
     });
@@ -1488,6 +1527,19 @@ app.put('/api/attendance-audit/:reportDate/record/:recordId', async (req, res) =
     if (unit !== undefined) rec.unit = unit;
     if (fullName !== undefined) rec.fullName = fullName;
 
+    const shift = String(rec.shiftName || '').toLowerCase().trim();
+    const isPresent = String(rec.present || '').toLowerCase().trim() === 'yes';
+    const hrs = Number(rec.workHrs || 0);
+    rec.isDot = (shift === 'off' || shift.includes('off')) && isPresent;
+    rec.is24Hours = hrs >= 19;
+    if (rec.isDot && rec.is24Hours) rec.category = 'BOTH';
+    else if (rec.isDot) rec.category = 'DOT';
+    else rec.category = '24_HRS';
+
+    audit.dotCount = audit.dotRecords.filter(r => r.isDot).length;
+    audit.twentyFourHrsCount = audit.dotRecords.filter(r => r.is24Hours).length;
+    audit.totalIncidentsCount = audit.dotRecords.length;
+
     await audit.save();
 
     res.json({ success: true, message: 'Record updated successfully', record: rec });
@@ -1511,7 +1563,9 @@ app.delete('/api/attendance-audit/:reportDate/record/:recordId', async (req, res
     }
 
     audit.dotRecords = audit.dotRecords.filter(r => String(r._id) !== String(recordId));
-    audit.dotCount = audit.dotRecords.length;
+    audit.dotCount = audit.dotRecords.filter(r => r.isDot).length;
+    audit.twentyFourHrsCount = audit.dotRecords.filter(r => r.is24Hours).length;
+    audit.totalIncidentsCount = audit.dotRecords.length;
     await audit.save();
 
     res.json({ success: true, message: 'Employee record removed from audit.', remainingCount: audit.dotRecords.length });
@@ -1581,23 +1635,45 @@ app.post('/api/attendance-audit/:reportDate/record', async (req, res) => {
       }
     }
 
+    const shift = String(shiftName || 'Off').toLowerCase().trim();
+    const isPresent = String(present || 'Yes').toLowerCase().trim() === 'yes';
+    const hrs = Number(workHrs || 0);
+    const isDot = (shift === 'off' || shift.includes('off')) && isPresent;
+    const is24Hours = hrs >= 19;
+    let category = 'DOT';
+    if (isDot && is24Hours) category = 'BOTH';
+    else if (isDot) category = 'DOT';
+    else category = '24_HRS';
+
+    let reason = dotReason;
+    if (!reason) {
+      if (isDot && is24Hours) reason = 'Off Day & 24 Hours Duty';
+      else if (isDot) reason = 'Double OT (Off Day)';
+      else reason = `24 Hours Duty (${hrs}h)`;
+    }
+
     const newRecord = {
       epfNo: epfRaw,
       fullName: resolvedName,
-      department: department || '',
-      unit: unit || '',
+      department: department || 'General',
+      unit: unit || 'General',
       shiftName: shiftName || 'Off',
       present: present || 'Yes',
       firstDate: reportDate,
-      workHrs: Number(workHrs || 0),
-      dotReason: dotReason || (shiftName?.toLowerCase() === 'off' ? 'Shift = Off (Manual Entry)' : 'Work Hrs >= 19h (Manual Entry)'),
+      workHrs: hrs,
+      dotReason: reason,
+      category,
+      isDot,
+      is24Hours,
       vinodStatus,
       vinodReqNumber,
       vinodReqId
     };
 
     audit.dotRecords.push(newRecord);
-    audit.dotCount = audit.dotRecords.length;
+    audit.dotCount = audit.dotRecords.filter(r => r.isDot).length;
+    audit.twentyFourHrsCount = audit.dotRecords.filter(r => r.is24Hours).length;
+    audit.totalIncidentsCount = audit.dotRecords.length;
     await audit.save();
 
     res.json({ success: true, message: `Employee #${epfNo} (${resolvedName}) added to audit.`, record: newRecord });

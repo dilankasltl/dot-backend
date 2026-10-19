@@ -11,7 +11,10 @@ const dotRecordSchema = new mongoose.Schema({
   workHrs: { type: Number, default: 0 },
   inTime: { type: String, default: '' },
   outTime: { type: String, default: '' },
-  dotReason: { type: String, default: '' }, // 'Shift Off' | 'Work Hrs >= 19' | 'Both'
+  dotReason: { type: String, default: '' }, // 'Shift Off' | '24 Hours Duty' | 'Both'
+  category: { type: String, default: 'DOT' }, // 'DOT' | '24_HRS' | 'BOTH'
+  isDot: { type: Boolean, default: false }, // Shift = 'off' and Present = 'yes'
+  is24Hours: { type: Boolean, default: false }, // Work Hrs >= 19
   vinodStatus: { 
     type: String, 
     enum: ['APPROVED', 'PENDING', 'NOT_APPROVED', 'REJECTED'],
@@ -27,7 +30,9 @@ const attendanceAuditSchema = new mongoose.Schema({
   uploadedBy: { type: String, required: true },
   uploadedAt: { type: Date, default: Date.now },
   totalReportRows: { type: Number, default: 0 },
-  dotCount: { type: Number, default: 0 },
+  dotCount: { type: Number, default: 0 }, // Double OT only (Shift = off & Present = yes)
+  twentyFourHrsCount: { type: Number, default: 0 }, // 24 Hours Duty only (Work Hrs >= 19)
+  totalIncidentsCount: { type: Number, default: 0 },
   dotRecords: [dotRecordSchema]
 }, { timestamps: true });
 
