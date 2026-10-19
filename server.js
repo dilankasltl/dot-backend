@@ -1093,7 +1093,20 @@ app.post('/api/attendance-audit/save', async (req, res) => {
       empMap.set(clean, emp.fullName);
     });
 
-    const enrichedRecords = records.map(r => {
+    // Filter records according to Double OT conditions:
+    // 1. Shift Name = 'off' AND Present = 'Yes' (Off day worked)
+    // 2. Work Hrs >= 19
+    const validRecords = records.filter(r => {
+      const shift = String(r.shiftName || '').toLowerCase().trim();
+      const present = String(r.present || '').toLowerCase().trim();
+      const workHrs = Number(r.workHrs || 0);
+
+      const isOffDayWorked = (shift === 'off' || shift.includes('off')) && (present === 'yes');
+      const isHighHours = workHrs >= 19;
+      return isOffDayWorked || isHighHours;
+    });
+
+    const enrichedRecords = validRecords.map(r => {
       const epfRaw = String(r.epfNo || '').trim();
       const epfClean = String(parseInt(epfRaw, 10) || epfRaw);
       
@@ -1262,8 +1275,9 @@ app.get('/api/attendance-audit', async (req, res) => {
 
     const approvedCount = refreshedRecords.filter(r => r.vinodStatus === 'APPROVED').length;
     const pendingCount = refreshedRecords.filter(r => r.vinodStatus === 'PENDING').length;
-    const notApprovedCount = refreshedRecords.filter(r => r.vinodStatus === 'NOT_APPROVED').length;
-    const offShiftCount = refreshedRecords.filter(r => r.shiftName && r.shiftName.toLowerCase() === 'off').length;
+    const offShiftCount = refreshedRecords.filter(r => 
+      r.shiftName && r.shiftName.toLowerCase() === 'off' && String(r.present || '').toLowerCase() === 'yes'
+    ).length;
     const extendedHoursCount = refreshedRecords.filter(r => r.workHrs >= 19).length;
 
     res.json({
