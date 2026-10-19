@@ -84,6 +84,47 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
+// Live session verification & permissions sync
+app.get('/api/auth/me', async (req, res) => {
+  try {
+    const { username } = req.query;
+    if (!username) {
+      return res.status(400).json({ error: 'Username query parameter is required' });
+    }
+
+    const user = await User.findOne({ username });
+    if (!user) {
+      return res.status(404).json({ error: 'User account not found' });
+    }
+
+    if (user.isActive === false && user.username !== 'Admin') {
+      return res.status(403).json({
+        error: 'Access Revoked: Your account access has been revoked or deactivated by the Administrator.',
+        isActive: false
+      });
+    }
+
+    res.json({
+      user: {
+        id: user._id,
+        username: user.username,
+        name: user.name,
+        role: user.role,
+        department: user.department,
+        assignedL1Approver: user.assignedL1Approver,
+        approvedDepartments: user.approvedDepartments || [],
+        canViewAllPending: !!user.canViewAllPending,
+        canViewCharts: !!user.canViewCharts,
+        canManageAttendance: !!user.canManageAttendance,
+        canViewAttendance: !!user.canViewAttendance,
+        isActive: user.isActive !== false
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/auth/reset-password', async (req, res) => {
   try {
     const { username, newPassword } = req.body;
@@ -739,9 +780,19 @@ app.get('/api/requests', async (req, res) => {
         status: { $in: ['PENDING_L1', 'PENDING_FINAL'] }
       }).sort({ createdAt: -1 });
 
+      let allPending = [];
+      if (user.canViewAllPending) {
+        allPending = await DotRequest.find({
+          status: { $in: ['PENDING_L1', 'PENDING_FINAL'] },
+          isDeleted: false,
+          hiddenForUsers: { $ne: user.username }
+        }).sort({ createdAt: -1 });
+      }
+
       return res.json({
         requests,
         pendingRequests,
+        allPending,
         type: 'requester'
       });
     }
