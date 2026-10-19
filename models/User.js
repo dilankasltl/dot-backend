@@ -15,9 +15,12 @@ const userSchema = new mongoose.Schema({
   assignedL1Approver: { type: String, default: '' },
   // For L1 approvers: which departments they can approve
   approvedDepartments: [{ type: String }],
-  // Permissions
+  // Permissions & Access Control
+  isActive: { type: Boolean, default: true },
   canViewAllPending: { type: Boolean, default: false },
   canViewCharts: { type: Boolean, default: false },
+  canManageAttendance: { type: Boolean, default: false },
+  canViewAttendance: { type: Boolean, default: false },
 }, { timestamps: true });
 
 module.exports = mongoose.model('User', userSchema);

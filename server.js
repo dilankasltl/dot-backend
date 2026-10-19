@@ -52,6 +52,11 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid username or password' });
     }
 
+    // Check if account access has been revoked/deactivated by Admin
+    if (user.isActive === false) {
+      return res.status(403).json({ error: 'Access Revoked: Your account access has been revoked or deactivated by the Administrator. Please contact System Admin.' });
+    }
+
     // Supports user's customized password OR default master password
     const isMatch = (user.password === password) || (user.defaultPassword && user.defaultPassword === password);
     if (!isMatch) {
@@ -67,8 +72,11 @@ app.post('/api/auth/login', async (req, res) => {
         department: user.department,
         assignedL1Approver: user.assignedL1Approver,
         approvedDepartments: user.approvedDepartments || [],
-        canViewAllPending: user.canViewAllPending,
-        canViewCharts: user.canViewCharts,
+        canViewAllPending: !!user.canViewAllPending,
+        canViewCharts: !!user.canViewCharts,
+        canManageAttendance: !!user.canManageAttendance,
+        canViewAttendance: !!user.canViewAttendance,
+        isActive: user.isActive !== false
       }
     });
   } catch (err) {
@@ -100,7 +108,7 @@ app.post('/api/auth/reset-password', async (req, res) => {
 app.get('/api/auth/users', async (req, res) => {
   try {
     const users = await User.find(
-      { username: { $ne: 'Admin' }, role: { $ne: 'admin' } },
+      { username: { $ne: 'Admin' }, role: { $ne: 'admin' }, isActive: { $ne: false } },
       '-password'
     ).sort({ role: 1, department: 1, name: 1 });
     res.json(users);
@@ -130,7 +138,7 @@ app.get('/api/admin/hods', async (req, res) => {
   }
 });
 
-// 3. Create a new User (Requester or HOD, with optional inline HOD creation)
+// 3. Create a new User with full access permissions
 app.post('/api/admin/users', async (req, res) => {
   try {
     const {
@@ -141,6 +149,11 @@ app.post('/api/admin/users', async (req, res) => {
       department,
       assignedL1Approver,
       approvedDepartments,
+      isActive,
+      canViewAllPending,
+      canViewCharts,
+      canManageAttendance,
+      canViewAttendance,
       createHODInline,
       hodUsername,
       hodPassword,
@@ -177,8 +190,11 @@ app.post('/api/admin/users', async (req, res) => {
         name: formattedHodName,
         role: 'approver_l1',
         approvedDepartments: department ? [department.trim()] : [],
+        isActive: true,
         canViewAllPending: false,
-        canViewCharts: true
+        canViewCharts: true,
+        canManageAttendance: false,
+        canViewAttendance: false
       });
 
       finalAssignedL1 = newHod.name;
@@ -187,6 +203,12 @@ app.post('/api/admin/users', async (req, res) => {
     const formattedName = (name.trim().startsWith('Mr.') || role === 'admin')
       ? name.trim()
       : `Mr. ${name.trim()}`;
+
+    const userActive = typeof isActive === 'boolean' ? isActive : true;
+    const viewAll = typeof canViewAllPending === 'boolean' ? canViewAllPending : (role === 'viewer' || role === 'admin' || role === 'approver_final');
+    const viewCharts = typeof canViewCharts === 'boolean' ? canViewCharts : (role !== 'requester');
+    const manageAtt = typeof canManageAttendance === 'boolean' ? canManageAttendance : (role === 'admin' || username.toLowerCase().includes('nimesh'));
+    const viewAtt = typeof canViewAttendance === 'boolean' ? canViewAttendance : (role === 'admin' || role === 'viewer' || role === 'approver_final' || viewAll);
 
     let newUser;
     if (role === 'requester') {
@@ -202,6 +224,11 @@ app.post('/api/admin/users', async (req, res) => {
         role: 'requester',
         department: department.trim(),
         assignedL1Approver: finalAssignedL1,
+        isActive: userActive,
+        canViewAllPending: viewAll,
+        canViewCharts: viewCharts,
+        canManageAttendance: manageAtt,
+        canViewAttendance: viewAtt
       });
 
       // Ensure the department is registered in the assigned HOD's approvedDepartments
@@ -223,8 +250,11 @@ app.post('/api/admin/users', async (req, res) => {
         name: formattedName,
         role: 'approver_l1',
         approvedDepartments: depts,
-        canViewAllPending: false,
-        canViewCharts: true
+        isActive: userActive,
+        canViewAllPending: viewAll,
+        canViewCharts: viewCharts,
+        canManageAttendance: manageAtt,
+        canViewAttendance: viewAtt
       });
     } else {
       newUser = await User.create({
@@ -234,8 +264,11 @@ app.post('/api/admin/users', async (req, res) => {
         name: formattedName,
         role: role,
         department: department ? department.trim() : '',
-        canViewAllPending: true,
-        canViewCharts: true
+        isActive: userActive,
+        canViewAllPending: viewAll,
+        canViewCharts: viewCharts,
+        canManageAttendance: manageAtt,
+        canViewAttendance: viewAtt
       });
     }
 
@@ -245,10 +278,22 @@ app.post('/api/admin/users', async (req, res) => {
   }
 });
 
-// 4. Update user
+// 4. Update user (Role, Access, Permissions, Department, Password)
 app.put('/api/admin/users/:id', async (req, res) => {
   try {
-    const { name, password, department, assignedL1Approver, approvedDepartments } = req.body;
+    const {
+      name,
+      password,
+      role,
+      department,
+      assignedL1Approver,
+      approvedDepartments,
+      isActive,
+      canViewAllPending,
+      canViewCharts,
+      canManageAttendance,
+      canViewAttendance
+    } = req.body;
     const user = await User.findById(req.params.id);
 
     if (!user) {
@@ -266,8 +311,24 @@ app.put('/api/admin/users/:id', async (req, res) => {
       user.defaultPassword = password.trim();
     }
 
+    // Role modification (prohibit changing master Admin account role)
+    if (role && user.username !== 'Admin') {
+      user.role = role;
+    }
+
+    // Access Grant/Revoke (prohibit revoking Admin)
+    if (typeof isActive === 'boolean' && user.username !== 'Admin') {
+      user.isActive = isActive;
+    }
+
+    // Feature permissions
+    if (typeof canViewAllPending === 'boolean') user.canViewAllPending = canViewAllPending;
+    if (typeof canViewCharts === 'boolean') user.canViewCharts = canViewCharts;
+    if (typeof canManageAttendance === 'boolean') user.canManageAttendance = canManageAttendance;
+    if (typeof canViewAttendance === 'boolean') user.canViewAttendance = canViewAttendance;
+
     if (user.role === 'requester') {
-      if (department) user.department = department.trim();
+      if (department !== undefined) user.department = department ? department.trim() : '';
       if (assignedL1Approver) {
         user.assignedL1Approver = assignedL1Approver.trim();
         await User.updateOne(
@@ -276,15 +337,41 @@ app.put('/api/admin/users/:id', async (req, res) => {
         );
       }
     } else if (user.role === 'approver_l1') {
-      if (approvedDepartments) {
+      if (approvedDepartments !== undefined) {
         user.approvedDepartments = Array.isArray(approvedDepartments)
           ? approvedDepartments
           : approvedDepartments.split(',').map(d => d.trim()).filter(Boolean);
       }
+    } else {
+      if (department !== undefined) user.department = department ? department.trim() : '';
     }
 
     await user.save();
     res.json({ message: 'User updated successfully', user });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 4.1 Quick Toggle Access (Grant or Revoke with one click)
+app.patch('/api/admin/users/:id/toggle-access', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (user.username === 'Admin') {
+      return res.status(400).json({ error: 'Administrator access cannot be revoked.' });
+    }
+
+    user.isActive = user.isActive === false ? true : false;
+    await user.save();
+
+    res.json({
+      message: user.isActive ? `Access successfully granted to ${user.name}` : `Access successfully revoked from ${user.name}`,
+      user
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
