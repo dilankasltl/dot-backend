@@ -1356,98 +1356,156 @@ app.post('/api/attendance-audit/save', async (req, res) => {
   }
 });
 
-// 2. Get attendance audit report by date with dynamic Vinod approval check
+// 2. Get attendance audit report by single date, month, or date range with dynamic Vinod approval check
 app.get('/api/attendance-audit', async (req, res) => {
   try {
-    const { date } = req.query;
-    const availableAudits = await AttendanceAudit.find({}, 'reportDate rawDateStr uploadedBy uploadedAt totalReportRows dotCount').sort({ reportDate: -1 });
+    const { date, month, startDate, endDate, mode } = req.query;
+    const availableAudits = await AttendanceAudit.find({}, 'reportDate rawDateStr uploadedBy uploadedAt totalReportRows dotCount twentyFourHrsCount totalIncidentsCount').sort({ reportDate: -1 });
     const availableDates = availableAudits.map(a => a.reportDate);
+    const availableMonths = Array.from(new Set(availableDates.map(d => String(d).slice(0, 7)).filter(Boolean))).sort().reverse();
 
-    const targetDate = date ? normalizeDateStr(date) : (availableDates[0] || '');
-
-    if (!targetDate) {
-      return res.json({
-        audit: null,
-        availableDates: [],
-        availableAudits: [],
-        summary: { totalDot: 0, approvedCount: 0, notApprovedCount: 0, pendingCount: 0 }
-      });
+    // Determine query mode
+    let filterMode = mode;
+    if (!filterMode) {
+      if (month && !date) filterMode = 'month';
+      else if (startDate && endDate && !date) filterMode = 'range';
+      else filterMode = 'single';
     }
 
-    const audit = await AttendanceAudit.findOne({
-      $or: [{ reportDate: targetDate }, { rawDateStr: targetDate }]
-    });
+    let matchedAudits = [];
+    let targetMonth = month || availableMonths[0] || '';
+    let startNorm = startDate ? normalizeDateStr(startDate) : '';
+    let endNorm = endDate ? normalizeDateStr(endDate) : '';
+    let targetDate = '';
 
-    if (!audit) {
+    if (filterMode === 'month') {
+      if (targetMonth) {
+        matchedAudits = await AttendanceAudit.find({
+          reportDate: { $regex: `^${targetMonth}` }
+        }).sort({ reportDate: 1 });
+      }
+    } else if (filterMode === 'range') {
+      if (startNorm && endNorm) {
+        matchedAudits = await AttendanceAudit.find({
+          reportDate: { $gte: startNorm, $lte: endNorm }
+        }).sort({ reportDate: 1 });
+      }
+    } else {
+      // Default: single day
+      filterMode = 'single';
+      targetDate = date ? normalizeDateStr(date) : (availableDates[0] || '');
+      if (targetDate) {
+        const singleAudit = await AttendanceAudit.findOne({
+          $or: [{ reportDate: targetDate }, { rawDateStr: targetDate }]
+        });
+        if (singleAudit) matchedAudits = [singleAudit];
+      }
+    }
+
+    if (matchedAudits.length === 0) {
       return res.json({
         audit: null,
+        filterMode,
+        targetMonth,
+        startDate: startNorm,
+        endDate: endNorm,
+        targetDate,
         availableDates,
+        availableMonths,
         availableAudits,
-        summary: { totalDot: 0, approvedCount: 0, notApprovedCount: 0, pendingCount: 0 }
+        summary: { totalIncidents: 0, totalDot: 0, twentyFourHrsCount: 0, approvedCount: 0, notApprovedCount: 0, pendingCount: 0, totalReportRows: 0, daysCount: 0 }
       });
     }
+
+    // Collect all audit dates across matched audits
+    const allAuditDates = [];
+    matchedAudits.forEach(a => {
+      if (a.reportDate) allAuditDates.push(a.reportDate);
+      if (a.rawDateStr) allAuditDates.push(a.rawDateStr);
+    });
 
     // Dynamic live check against current DotRequest state in database
     const matchingRequests = await DotRequest.find({
       isDeleted: false,
-      date: { $in: [audit.reportDate, audit.rawDateStr, targetDate].filter(Boolean) }
+      date: { $in: Array.from(new Set(allAuditDates)) }
     });
 
-    const refreshedRecords = audit.dotRecords.map(r => {
-      const epfRaw = String(r.epfNo || '').trim();
-      const epfClean = String(parseInt(epfRaw, 10) || epfRaw);
+    let totalReportRowsSum = 0;
+    const refreshedRecords = [];
 
-      const epfReqs = matchingRequests.filter(q => 
-        q.employees && q.employees.some(e => {
-          const eNum = String(e.epfNo || '').trim();
-          const eClean = String(parseInt(eNum, 10) || eNum);
-          return eNum === epfRaw || eClean === epfClean || eClean === epfRaw || eNum === epfClean;
-        })
-      );
+    matchedAudits.forEach(audit => {
+      totalReportRowsSum += Number(audit.totalReportRows || 0);
 
-      let vinodStatus = 'NOT_APPROVED';
-      let vinodReqNumber = '';
-      let vinodReqId = '';
+      audit.dotRecords.forEach(r => {
+        const epfRaw = String(r.epfNo || '').trim();
+        const epfClean = String(parseInt(epfRaw, 10) || epfRaw);
+        const recDate = r.firstDate || audit.reportDate || audit.rawDateStr || '';
+        const recDateNorm = normalizeDateStr(recDate);
+        const auditDateNorm = normalizeDateStr(audit.reportDate);
 
-      const approvedReq = epfReqs.find(q => q.status === 'APPROVED');
-      if (approvedReq) {
-        vinodStatus = 'APPROVED';
-        vinodReqNumber = approvedReq.reqNumber;
-        vinodReqId = String(approvedReq._id);
-      } else {
-        const pendingReq = epfReqs.find(q => q.status === 'PENDING_FINAL' || q.status === 'PENDING_L1');
-        if (pendingReq) {
-          vinodStatus = 'PENDING';
-          vinodReqNumber = pendingReq.reqNumber;
-          vinodReqId = String(pendingReq._id);
+        // Match DotRequests for this EPF and date
+        const epfReqs = matchingRequests.filter(q => {
+          const qDateNorm = normalizeDateStr(q.date);
+          const isDateMatch = qDateNorm === recDateNorm || qDateNorm === auditDateNorm || q.date === recDate || q.date === audit.reportDate;
+          if (!isDateMatch) return false;
+          return q.employees && q.employees.some(e => {
+            const eNum = String(e.epfNo || '').trim();
+            const eClean = String(parseInt(eNum, 10) || eNum);
+            return eNum === epfRaw || eClean === epfClean || eClean === epfRaw || eNum === epfClean;
+          });
+        });
+
+        let vinodStatus = 'NOT_APPROVED';
+        let vinodReqNumber = '';
+        let vinodReqId = '';
+
+        const approvedReq = epfReqs.find(q => q.status === 'APPROVED');
+        if (approvedReq) {
+          vinodStatus = 'APPROVED';
+          vinodReqNumber = approvedReq.reqNumber;
+          vinodReqId = String(approvedReq._id);
         } else {
-          const rejectedReq = epfReqs.find(q => q.status === 'REJECTED');
-          if (rejectedReq) {
-            vinodStatus = 'REJECTED';
-            vinodReqNumber = rejectedReq.reqNumber;
-            vinodReqId = String(rejectedReq._id);
+          const pendingReq = epfReqs.find(q => q.status === 'PENDING_FINAL' || q.status === 'PENDING_L1');
+          if (pendingReq) {
+            vinodStatus = 'PENDING';
+            vinodReqNumber = pendingReq.reqNumber;
+            vinodReqId = String(pendingReq._id);
+          } else {
+            const rejectedReq = epfReqs.find(q => q.status === 'REJECTED');
+            if (rejectedReq) {
+              vinodStatus = 'REJECTED';
+              vinodReqNumber = rejectedReq.reqNumber;
+              vinodReqId = String(rejectedReq._id);
+            }
           }
         }
-      }
 
-      const isDot = (String(r.shiftName || '').toLowerCase() === 'off' || String(r.shiftName || '').toLowerCase().includes('off')) && (String(r.present || '').toLowerCase() === 'yes');
-      const is24Hours = Number(r.workHrs || 0) >= 19;
-      let category = r.category;
-      if (!category) {
-        if (isDot && is24Hours) category = 'BOTH';
-        else if (isDot) category = 'DOT';
-        else category = '24_HRS';
-      }
+        const shift = String(r.shiftName || '').toLowerCase().trim();
+        const present = String(r.present || '').toLowerCase().trim();
+        const workHrs = Number(r.workHrs || 0);
+        const isDot = (shift === 'off' || shift.includes('off')) && (present === 'yes');
+        const is24Hours = workHrs >= 19;
+        let category = r.category;
+        if (!category) {
+          if (isDot && is24Hours) category = 'BOTH';
+          else if (isDot) category = 'DOT';
+          else category = '24_HRS';
+        }
 
-      return {
-        ...r.toObject(),
-        category,
-        isDot,
-        is24Hours,
-        vinodStatus,
-        vinodReqNumber,
-        vinodReqId
-      };
+        refreshedRecords.push({
+          ...r.toObject(),
+          reportDate: audit.reportDate,
+          rawDateStr: audit.rawDateStr,
+          auditId: String(audit._id),
+          firstDate: r.firstDate || audit.reportDate,
+          category,
+          isDot,
+          is24Hours,
+          vinodStatus,
+          vinodReqNumber,
+          vinodReqId
+        });
+      });
     });
 
     const approvedCount = refreshedRecords.filter(r => r.vinodStatus === 'APPROVED').length;
@@ -1456,12 +1514,44 @@ app.get('/api/attendance-audit', async (req, res) => {
     const dotCount = refreshedRecords.filter(r => r.isDot || (String(r.shiftName).toLowerCase().includes('off') && String(r.present || '').toLowerCase() === 'yes')).length;
     const twentyFourHrsCount = refreshedRecords.filter(r => r.is24Hours || Number(r.workHrs || 0) >= 19).length;
 
+    let effectiveReportDate = '';
+    if (filterMode === 'month') {
+      effectiveReportDate = targetMonth;
+    } else if (filterMode === 'range') {
+      effectiveReportDate = `${startNorm} to ${endNorm}`;
+    } else {
+      effectiveReportDate = matchedAudits[0]?.reportDate || targetDate;
+    }
+
+    const auditPayload = filterMode === 'single'
+      ? {
+          ...matchedAudits[0].toObject(),
+          dotRecords: refreshedRecords
+        }
+      : {
+          reportDate: effectiveReportDate,
+          filterMode,
+          isMultiDate: true,
+          daysCount: matchedAudits.length,
+          auditedDates: matchedAudits.map(a => a.reportDate),
+          uploadedBy: matchedAudits.length === 1 ? matchedAudits[0].uploadedBy : `${matchedAudits.length} Daily Audits`,
+          uploadedAt: matchedAudits[matchedAudits.length - 1]?.uploadedAt,
+          totalReportRows: totalReportRowsSum,
+          dotCount,
+          twentyFourHrsCount,
+          totalIncidentsCount: refreshedRecords.length,
+          dotRecords: refreshedRecords
+        };
+
     res.json({
-      audit: {
-        ...audit.toObject(),
-        dotRecords: refreshedRecords
-      },
+      audit: auditPayload,
+      filterMode,
+      targetMonth,
+      startDate: startNorm,
+      endDate: endNorm,
+      targetDate: effectiveReportDate,
       availableDates,
+      availableMonths,
       availableAudits,
       summary: {
         totalIncidents: refreshedRecords.length,
@@ -1472,7 +1562,8 @@ app.get('/api/attendance-audit', async (req, res) => {
         pendingCount,
         offShiftCount: dotCount,
         extendedHoursCount: twentyFourHrsCount,
-        totalReportRows: audit.totalReportRows
+        totalReportRows: totalReportRowsSum,
+        daysCount: matchedAudits.length
       }
     });
   } catch (err) {
