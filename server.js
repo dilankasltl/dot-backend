@@ -1585,6 +1585,15 @@ app.delete('/api/attendance-audit/:reportDate', async (req, res) => {
         { rawDateStr: norm }
       ]
     });
+    // Also delete corresponding DailyHeadcount report for this date
+    await DailyHeadcount.deleteMany({
+      $or: [
+        { reportDate },
+        { reportDate: norm },
+        { rawDateStr: reportDate },
+        { rawDateStr: norm }
+      ]
+    });
     res.json({ success: true, message: `Attendance report for ${reportDate} deleted successfully for all users.`, deletedCount: result.deletedCount });
   } catch (err) {
     res.status(500).json({ error: err.message });
