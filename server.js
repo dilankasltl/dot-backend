@@ -10,6 +10,7 @@ const User = require('./models/User');
 const Employee = require('./models/Employee');
 const DotRequest = require('./models/DotRequest');
 const AttendanceAudit = require('./models/AttendanceAudit');
+const DailyHeadcount = require('./models/DailyHeadcount');
 const { seedDatabase } = require('./seedData');
 
 const app = express();
@@ -1768,6 +1769,537 @@ app.post('/api/attendance-audit/:reportDate/record', async (req, res) => {
     await audit.save();
 
     res.json({ success: true, message: `Employee #${epfNo} (${resolvedName}) added to audit.`, record: newRecord });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// =========================================================================
+// --- Daily Headcount & Plant-Wide Attendance Analytics Routes ---
+// =========================================================================
+
+function parseLateMinutes(t) {
+  if (!t) return 0;
+  const parts = String(t).trim().split(':');
+  if (parts.length >= 2) {
+    const h = parseInt(parts[0], 10) || 0;
+    const m = parseInt(parts[1], 10) || 0;
+    return h * 60 + m;
+  }
+  return 0;
+}
+
+function computeHeadcountMetrics(records) {
+  // strictly exclude Number = 00001
+  const valid = records.filter(r => {
+    const epf = String(r.epfNo || '').trim();
+    return epf !== '00001' && epf !== '1' && !epf.endsWith('00001');
+  });
+
+  const headcount = valid.length;
+  const maleCount = valid.filter(r => String(r.gender || '').trim().toUpperCase() === 'MALE').length;
+  const femaleCount = valid.filter(r => String(r.gender || '').trim().toUpperCase() === 'FEMALE').length;
+  const presentCount = valid.filter(r => String(r.present || '').trim().toLowerCase() === 'yes').length;
+  const absentCount = Math.max(0, headcount - presentCount);
+  const leaveCount = valid.filter(r => String(r.leave || '').trim().toLowerCase() === 'yes').length;
+  const lateOver15Count = valid.filter(r => {
+    const mins = r.lateMinutes !== undefined ? r.lateMinutes : parseLateMinutes(r.late);
+    return mins > 15;
+  }).length;
+
+  return {
+    headcount,
+    maleCount,
+    femaleCount,
+    presentCount,
+    absentCount,
+    leaveCount,
+    lateOver15Count
+  };
+}
+
+// 1. Save or Update Daily Headcount Report
+app.post('/api/daily-headcount/save', async (req, res) => {
+  try {
+    const { reportDate, rawDateStr, uploadedBy, records } = req.body;
+    if (!reportDate || !Array.isArray(records)) {
+      return res.status(400).json({ error: 'reportDate and records array are required' });
+    }
+
+    const normDate = normalizeDateStr(reportDate);
+
+    // Fetch employee directory for official name lookup
+    const allEmployees = await Employee.find({});
+    const empMap = new Map();
+    allEmployees.forEach(emp => {
+      const epf = String(emp.epfNo).trim();
+      const clean = String(parseInt(epf, 10) || epf);
+      empMap.set(epf, emp.fullName);
+      empMap.set(clean, emp.fullName);
+    });
+
+    // Filter out Number = 00001
+    const validRaw = records.filter(r => {
+      const epf = String(r.epfNo || r.number || '').trim();
+      return epf && epf !== '00001' && epf !== '1' && !epf.endsWith('00001');
+    });
+
+    const enrichedRecords = validRaw.map(r => {
+      const epfRaw = String(r.epfNo || r.number || '').trim();
+      const epfClean = String(parseInt(epfRaw, 10) || epfRaw);
+      const matchedName = empMap.get(epfRaw) || empMap.get(epfClean) || r.fullName || r.name || 'Unknown';
+      const lateStr = String(r.late || '').trim();
+      const lateMins = parseLateMinutes(lateStr);
+
+      return {
+        epfNo: epfRaw,
+        fullName: matchedName,
+        department: r.department || 'General',
+        unit: r.unit || 'General',
+        gender: String(r.gender || 'MALE').trim().toUpperCase(),
+        shiftName: r.shiftName || '',
+        present: String(r.present || 'Yes').trim(),
+        leave: String(r.leave || 'No').trim(),
+        firstDate: r.firstDate || rawDateStr || normDate,
+        inTime: r.inTime || '',
+        outTime: r.outTime || '',
+        secondDate: r.secondDate || '',
+        secondInTime: r.secondInTime || '',
+        secondOutTime: r.secondOutTime || '',
+        late: lateStr,
+        lateMinutes: lateMins,
+        isLateOver15: lateMins > 15,
+        earlyDeparture: r.earlyDeparture || '',
+        workHrs: Number(r.workHrs || 0),
+        rostered: r.rostered || 'No'
+      };
+    });
+
+    const metrics = computeHeadcountMetrics(enrichedRecords);
+
+    const saved = await DailyHeadcount.findOneAndUpdate(
+      { reportDate: normDate },
+      {
+        $set: {
+          reportDate: normDate,
+          rawDateStr: rawDateStr || reportDate,
+          uploadedBy: uploadedBy || 'Mr. Nimesh',
+          uploadedAt: new Date(),
+          headcount: metrics.headcount,
+          maleCount: metrics.maleCount,
+          femaleCount: metrics.femaleCount,
+          presentCount: metrics.presentCount,
+          absentCount: metrics.absentCount,
+          leaveCount: metrics.leaveCount,
+          lateOver15Count: metrics.lateOver15Count,
+          records: enrichedRecords
+        }
+      },
+      { upsert: true, new: true }
+    );
+
+    res.json({
+      success: true,
+      message: `Daily Headcount for date ${normDate} saved successfully (${metrics.headcount} employees processed).`,
+      headcount: saved
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 2. Get Daily Headcount with Single Day, Month-Wise, or Date-Range Filtering
+app.get('/api/daily-headcount', async (req, res) => {
+  try {
+    const { mode = 'single', date, month, startDate, endDate } = req.query;
+
+    const allDates = await DailyHeadcount.find({}, 'reportDate uploadedBy').sort({ reportDate: -1 });
+    const availableDates = allDates.map(a => a.reportDate);
+    const availableMonths = Array.from(new Set(availableDates.map(d => d.slice(0, 7)))).sort().reverse();
+
+    // A. Month-Wise Aggregation
+    if (mode === 'month') {
+      let targetMonth = month;
+      if (!targetMonth && availableMonths.length > 0) {
+        targetMonth = availableMonths[0];
+      }
+      if (!targetMonth) {
+        targetMonth = new Date().toISOString().slice(0, 7);
+      }
+
+      const monthAudits = await DailyHeadcount.find({
+        reportDate: { $regex: `^${targetMonth}` }
+      }).sort({ reportDate: 1 });
+
+      const daysCount = monthAudits.length;
+      let totalHeadcount = 0;
+      let totalMale = 0;
+      let totalFemale = 0;
+      let totalPresent = 0;
+      let totalAbsent = 0;
+      let totalLeave = 0;
+      let totalLateOver15 = 0;
+
+      const dailyTimeline = [];
+      const allRecords = [];
+
+      monthAudits.forEach(audit => {
+        totalHeadcount += audit.headcount || 0;
+        totalMale += audit.maleCount || 0;
+        totalFemale += audit.femaleCount || 0;
+        totalPresent += audit.presentCount || 0;
+        totalAbsent += audit.absentCount || 0;
+        totalLeave += audit.leaveCount || 0;
+        totalLateOver15 += audit.lateOver15Count || 0;
+
+        dailyTimeline.push({
+          date: audit.reportDate,
+          headcount: audit.headcount || 0,
+          male: audit.maleCount || 0,
+          female: audit.femaleCount || 0,
+          present: audit.presentCount || 0,
+          absent: audit.absentCount || 0,
+          leave: audit.leaveCount || 0,
+          lateOver15: audit.lateOver15Count || 0
+        });
+
+        audit.records.forEach(r => {
+          allRecords.push({
+            ...r.toObject(),
+            reportDate: audit.reportDate,
+            firstDate: r.firstDate || audit.reportDate
+          });
+        });
+      });
+
+      const avgHeadcount = daysCount > 0 ? Math.round(totalHeadcount / daysCount) : 0;
+      const avgMale = daysCount > 0 ? Math.round(totalMale / daysCount) : 0;
+      const avgFemale = daysCount > 0 ? Math.round(totalFemale / daysCount) : 0;
+      const avgPresent = daysCount > 0 ? Math.round(totalPresent / daysCount) : 0;
+      const avgAbsent = daysCount > 0 ? Math.round(totalAbsent / daysCount) : 0;
+
+      return res.json({
+        filterMode: 'month',
+        targetMonth,
+        availableDates,
+        availableMonths,
+        availableAudits: allDates,
+        headcountData: {
+          reportDate: targetMonth,
+          isAggregated: true,
+          daysCount,
+          headcount: avgHeadcount,
+          maleCount: avgMale,
+          femaleCount: avgFemale,
+          presentCount: avgPresent,
+          absentCount: avgAbsent,
+          leaveCount: totalLeave,
+          lateOver15Count: totalLateOver15,
+          totalHeadcountCumulative: totalHeadcount,
+          dailyTimeline,
+          records: allRecords
+        }
+      });
+    }
+
+    // B. Custom Date Range Aggregation
+    if (mode === 'range') {
+      const startNorm = normalizeDateStr(startDate || '2000-01-01');
+      const endNorm = normalizeDateStr(endDate || '2099-12-31');
+
+      const rangeAudits = await DailyHeadcount.find({
+        reportDate: { $gte: startNorm, $lte: endNorm }
+      }).sort({ reportDate: 1 });
+
+      const daysCount = rangeAudits.length;
+      let totalHeadcount = 0;
+      let totalMale = 0;
+      let totalFemale = 0;
+      let totalPresent = 0;
+      let totalAbsent = 0;
+      let totalLeave = 0;
+      let totalLateOver15 = 0;
+
+      const dailyTimeline = [];
+      const allRecords = [];
+
+      rangeAudits.forEach(audit => {
+        totalHeadcount += audit.headcount || 0;
+        totalMale += audit.maleCount || 0;
+        totalFemale += audit.femaleCount || 0;
+        totalPresent += audit.presentCount || 0;
+        totalAbsent += audit.absentCount || 0;
+        totalLeave += audit.leaveCount || 0;
+        totalLateOver15 += audit.lateOver15Count || 0;
+
+        dailyTimeline.push({
+          date: audit.reportDate,
+          headcount: audit.headcount || 0,
+          male: audit.maleCount || 0,
+          female: audit.femaleCount || 0,
+          present: audit.presentCount || 0,
+          absent: audit.absentCount || 0,
+          leave: audit.leaveCount || 0,
+          lateOver15: audit.lateOver15Count || 0
+        });
+
+        audit.records.forEach(r => {
+          allRecords.push({
+            ...r.toObject(),
+            reportDate: audit.reportDate,
+            firstDate: r.firstDate || audit.reportDate
+          });
+        });
+      });
+
+      const avgHeadcount = daysCount > 0 ? Math.round(totalHeadcount / daysCount) : 0;
+      const avgMale = daysCount > 0 ? Math.round(totalMale / daysCount) : 0;
+      const avgFemale = daysCount > 0 ? Math.round(totalFemale / daysCount) : 0;
+      const avgPresent = daysCount > 0 ? Math.round(totalPresent / daysCount) : 0;
+      const avgAbsent = daysCount > 0 ? Math.round(totalAbsent / daysCount) : 0;
+
+      return res.json({
+        filterMode: 'range',
+        startDate: startNorm,
+        endDate: endNorm,
+        availableDates,
+        availableMonths,
+        availableAudits: allDates,
+        headcountData: {
+          reportDate: `${startNorm} to ${endNorm}`,
+          isAggregated: true,
+          daysCount,
+          headcount: avgHeadcount,
+          maleCount: avgMale,
+          femaleCount: avgFemale,
+          presentCount: avgPresent,
+          absentCount: avgAbsent,
+          leaveCount: totalLeave,
+          lateOver15Count: totalLateOver15,
+          dailyTimeline,
+          records: allRecords
+        }
+      });
+    }
+
+    // C. Single Day Mode (Default)
+    let queryDate = date;
+    if (!queryDate && availableDates.length > 0) {
+      queryDate = availableDates[0];
+    }
+
+    let report = null;
+    if (queryDate) {
+      const norm = normalizeDateStr(queryDate);
+      report = await DailyHeadcount.findOne({
+        $or: [{ reportDate: norm }, { rawDateStr: queryDate }, { reportDate: queryDate }]
+      });
+    }
+
+    if (!report && availableDates.length > 0) {
+      report = await DailyHeadcount.findOne({ reportDate: availableDates[0] });
+    }
+
+    res.json({
+      filterMode: 'single',
+      availableDates,
+      availableMonths,
+      availableAudits: allDates,
+      headcountData: report || null
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 3. Edit Employee Attendance Record (Mr. Nimesh / Admin)
+app.put('/api/daily-headcount/:reportDate/record/:recordId', async (req, res) => {
+  try {
+    const { reportDate, recordId } = req.params;
+    const { epfNo, fullName, department, unit, gender, shiftName, present, leave, late, workHrs, inTime, outTime } = req.body;
+
+    const norm = normalizeDateStr(reportDate);
+    const report = await DailyHeadcount.findOne({
+      $or: [{ reportDate: norm }, { rawDateStr: reportDate }, { reportDate }]
+    });
+
+    if (!report) {
+      return res.status(404).json({ error: 'Daily headcount report not found for this date' });
+    }
+
+    const rec = report.records.id(recordId);
+    if (!rec) {
+      return res.status(404).json({ error: 'Employee record not found in headcount report' });
+    }
+
+    if (epfNo !== undefined) rec.epfNo = String(epfNo).trim();
+    if (fullName !== undefined) rec.fullName = String(fullName).trim();
+    if (department !== undefined) rec.department = String(department).trim();
+    if (unit !== undefined) rec.unit = String(unit).trim();
+    if (gender !== undefined) rec.gender = String(gender).trim().toUpperCase();
+    if (shiftName !== undefined) rec.shiftName = String(shiftName).trim();
+    if (present !== undefined) rec.present = String(present).trim();
+    if (leave !== undefined) rec.leave = String(leave).trim();
+    if (inTime !== undefined) rec.inTime = String(inTime).trim();
+    if (outTime !== undefined) rec.outTime = String(outTime).trim();
+    if (workHrs !== undefined) rec.workHrs = Number(workHrs || 0);
+
+    if (late !== undefined) {
+      rec.late = String(late).trim();
+      rec.lateMinutes = parseLateMinutes(rec.late);
+      rec.isLateOver15 = rec.lateMinutes > 15;
+    }
+
+    const metrics = computeHeadcountMetrics(report.records);
+    report.headcount = metrics.headcount;
+    report.maleCount = metrics.maleCount;
+    report.femaleCount = metrics.femaleCount;
+    report.presentCount = metrics.presentCount;
+    report.absentCount = metrics.absentCount;
+    report.leaveCount = metrics.leaveCount;
+    report.lateOver15Count = metrics.lateOver15Count;
+
+    await report.save();
+
+    res.json({
+      success: true,
+      message: `Employee #${rec.epfNo} (${rec.fullName}) record updated successfully.`,
+      record: rec,
+      headcount: report
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 4. Delete Employee Record from Headcount (Mr. Nimesh / Admin)
+app.delete('/api/daily-headcount/:reportDate/record/:recordId', async (req, res) => {
+  try {
+    const { reportDate, recordId } = req.params;
+    const norm = normalizeDateStr(reportDate);
+
+    const report = await DailyHeadcount.findOne({
+      $or: [{ reportDate: norm }, { rawDateStr: reportDate }, { reportDate }]
+    });
+
+    if (!report) {
+      return res.status(404).json({ error: 'Daily headcount report not found for this date' });
+    }
+
+    report.records = report.records.filter(r => String(r._id) !== String(recordId));
+
+    const metrics = computeHeadcountMetrics(report.records);
+    report.headcount = metrics.headcount;
+    report.maleCount = metrics.maleCount;
+    report.femaleCount = metrics.femaleCount;
+    report.presentCount = metrics.presentCount;
+    report.absentCount = metrics.absentCount;
+    report.leaveCount = metrics.leaveCount;
+    report.lateOver15Count = metrics.lateOver15Count;
+
+    await report.save();
+
+    res.json({
+      success: true,
+      message: 'Employee record deleted successfully.',
+      headcount: report
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 5. Delete Full Day's Headcount Report (Mr. Nimesh / Admin)
+app.delete('/api/daily-headcount/:reportDate', async (req, res) => {
+  try {
+    const { reportDate } = req.params;
+    const norm = normalizeDateStr(reportDate);
+
+    const deleted = await DailyHeadcount.findOneAndDelete({
+      $or: [{ reportDate: norm }, { rawDateStr: reportDate }, { reportDate }]
+    });
+
+    if (!deleted) {
+      return res.status(404).json({ error: 'Daily headcount report not found for this date' });
+    }
+
+    res.json({
+      success: true,
+      message: `Daily Headcount report for ${norm} permanently deleted.`
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 6. Add Manual Employee Record to Headcount Report (Mr. Nimesh / Admin)
+app.post('/api/daily-headcount/:reportDate/record', async (req, res) => {
+  try {
+    const { reportDate } = req.params;
+    const { epfNo, fullName, department, unit, gender, shiftName, present, leave, late, workHrs, inTime, outTime } = req.body;
+
+    if (!epfNo) {
+      return res.status(400).json({ error: 'EPF Number is required' });
+    }
+
+    const norm = normalizeDateStr(reportDate);
+    const report = await DailyHeadcount.findOne({
+      $or: [{ reportDate: norm }, { rawDateStr: reportDate }, { reportDate }]
+    });
+
+    if (!report) {
+      return res.status(404).json({ error: 'Daily headcount report not found for this date' });
+    }
+
+    let resolvedName = fullName;
+    if (!resolvedName) {
+      const epfClean = String(parseInt(epfNo, 10) || epfNo);
+      const emp = await Employee.findOne({
+        $or: [{ epfNo: String(epfNo).trim() }, { epfNo: epfClean }]
+      });
+      resolvedName = emp ? emp.fullName : `Employee #${epfNo}`;
+    }
+
+    const lateStr = String(late || '00:00').trim();
+    const lateMins = parseLateMinutes(lateStr);
+
+    const newRecord = {
+      epfNo: String(epfNo).trim(),
+      fullName: resolvedName,
+      department: department || 'General',
+      unit: unit || 'General',
+      gender: String(gender || 'MALE').trim().toUpperCase(),
+      shiftName: shiftName || 'General GE',
+      present: present || 'Yes',
+      leave: leave || 'No',
+      firstDate: report.reportDate,
+      inTime: inTime || '',
+      outTime: outTime || '',
+      late: lateStr,
+      lateMinutes: lateMins,
+      isLateOver15: lateMins > 15,
+      workHrs: Number(workHrs || 8)
+    };
+
+    report.records.push(newRecord);
+
+    const metrics = computeHeadcountMetrics(report.records);
+    report.headcount = metrics.headcount;
+    report.maleCount = metrics.maleCount;
+    report.femaleCount = metrics.femaleCount;
+    report.presentCount = metrics.presentCount;
+    report.absentCount = metrics.absentCount;
+    report.leaveCount = metrics.leaveCount;
+    report.lateOver15Count = metrics.lateOver15Count;
+
+    await report.save();
+
+    res.json({
+      success: true,
+      message: `Employee #${epfNo} (${resolvedName}) added to headcount.`,
+      record: newRecord,
+      headcount: report
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
