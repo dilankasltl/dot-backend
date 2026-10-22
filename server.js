@@ -1798,6 +1798,12 @@ function parseLateMinutes(t) {
   return 0;
 }
 
+function isLeaveVal(val) {
+  if (!val) return false;
+  const s = String(val).trim().toLowerCase();
+  return s !== '' && s !== 'no' && s !== 'none' && s !== '-';
+}
+
 function computeHeadcountMetrics(records) {
   // strictly exclude Number = 00001
   const valid = records.filter(r => {
@@ -1810,7 +1816,7 @@ function computeHeadcountMetrics(records) {
   const femaleCount = valid.filter(r => String(r.gender || '').trim().toUpperCase() === 'FEMALE').length;
   const presentCount = valid.filter(r => String(r.present || '').trim().toLowerCase() === 'yes').length;
   const absentCount = Math.max(0, headcount - presentCount);
-  const leaveCount = valid.filter(r => String(r.leave || '').trim().toLowerCase() === 'yes').length;
+  const leaveCount = valid.filter(r => isLeaveVal(r.leave)).length;
   const lateOver15Count = valid.filter(r => {
     const mins = r.lateMinutes !== undefined ? r.lateMinutes : parseLateMinutes(r.late);
     return mins > 15;
@@ -1958,8 +1964,14 @@ app.get('/api/daily-headcount', async (req, res) => {
         totalFemale += audit.femaleCount || 0;
         totalPresent += audit.presentCount || 0;
         totalAbsent += audit.absentCount || 0;
-        totalLeave += audit.leaveCount || 0;
-        totalLateOver15 += audit.lateOver15Count || 0;
+        const dayLeave = audit.records
+          ? audit.records.filter(r => isLeaveVal(r.leave) && r.epfNo !== '00001' && r.epfNo !== '1').length
+          : (audit.leaveCount || 0);
+        const dayLateOver15 = audit.records
+          ? audit.records.filter(r => (r.isLateOver15 || parseLateMinutes(r.late) > 15) && r.epfNo !== '00001' && r.epfNo !== '1').length
+          : (audit.lateOver15Count || 0);
+        totalLeave += dayLeave;
+        totalLateOver15 += dayLateOver15;
 
         dailyTimeline.push({
           date: audit.reportDate,
@@ -1968,8 +1980,8 @@ app.get('/api/daily-headcount', async (req, res) => {
           female: audit.femaleCount || 0,
           present: audit.presentCount || 0,
           absent: audit.absentCount || 0,
-          leave: audit.leaveCount || 0,
-          lateOver15: audit.lateOver15Count || 0
+          leave: dayLeave,
+          lateOver15: dayLateOver15
         });
 
         audit.records.forEach(r => {
@@ -2038,8 +2050,14 @@ app.get('/api/daily-headcount', async (req, res) => {
         totalFemale += audit.femaleCount || 0;
         totalPresent += audit.presentCount || 0;
         totalAbsent += audit.absentCount || 0;
-        totalLeave += audit.leaveCount || 0;
-        totalLateOver15 += audit.lateOver15Count || 0;
+        const dayLeave = audit.records
+          ? audit.records.filter(r => isLeaveVal(r.leave) && r.epfNo !== '00001' && r.epfNo !== '1').length
+          : (audit.leaveCount || 0);
+        const dayLateOver15 = audit.records
+          ? audit.records.filter(r => (r.isLateOver15 || parseLateMinutes(r.late) > 15) && r.epfNo !== '00001' && r.epfNo !== '1').length
+          : (audit.lateOver15Count || 0);
+        totalLeave += dayLeave;
+        totalLateOver15 += dayLateOver15;
 
         dailyTimeline.push({
           date: audit.reportDate,
@@ -2048,8 +2066,8 @@ app.get('/api/daily-headcount', async (req, res) => {
           female: audit.femaleCount || 0,
           present: audit.presentCount || 0,
           absent: audit.absentCount || 0,
-          leave: audit.leaveCount || 0,
-          lateOver15: audit.lateOver15Count || 0
+          leave: dayLeave,
+          lateOver15: dayLateOver15
         });
 
         audit.records.forEach(r => {
@@ -2109,12 +2127,27 @@ app.get('/api/daily-headcount', async (req, res) => {
       report = await DailyHeadcount.findOne({ reportDate: availableDates[0] });
     }
 
+    if (report) {
+      const repObj = report.toObject();
+      if (repObj.records) {
+        repObj.leaveCount = repObj.records.filter(r => isLeaveVal(r.leave) && r.epfNo !== '00001' && r.epfNo !== '1').length;
+        repObj.lateOver15Count = repObj.records.filter(r => (r.isLateOver15 || parseLateMinutes(r.late) > 15) && r.epfNo !== '00001' && r.epfNo !== '1').length;
+      }
+      return res.json({
+        filterMode: 'single',
+        availableDates,
+        availableMonths,
+        availableAudits: allDates,
+        headcountData: repObj
+      });
+    }
+
     res.json({
       filterMode: 'single',
       availableDates,
       availableMonths,
       availableAudits: allDates,
-      headcountData: report || null
+      headcountData: null
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
