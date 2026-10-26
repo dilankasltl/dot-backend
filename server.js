@@ -634,8 +634,8 @@ app.post('/api/requests', async (req, res) => {
       requesterName: user.name,
       department: user.department,
       date: date || new Date().toISOString().split('T')[0],
-      shift: shift || 'SHIFT A',
-      hours: hours || 4,
+      shift: shift || 'Shift A',
+      hours: hours !== undefined ? Number(hours) : 0,
       reason: reason || 'Production Double OT',
       employees: employees.map(e => ({ epfNo: e.epfNo, fullName: e.fullName })),
       employeeCount: employees.length,
@@ -683,7 +683,7 @@ app.put('/api/requests/:id', async (req, res) => {
 
     if (date) request.date = date;
     if (shift) request.shift = shift;
-    if (hours) request.hours = Number(hours);
+    if (hours !== undefined) request.hours = Number(hours);
     if (reason !== undefined) request.reason = reason;
     if (employees && employees.length > 0) {
       request.employees = employees.map(e => ({ epfNo: e.epfNo, fullName: e.fullName }));
@@ -1143,7 +1143,7 @@ app.get('/api/analytics', async (req, res) => {
           }
 
           epfMap[key].totalCount += 1;
-          epfMap[key].totalHours += Number(req.hours || 4);
+          epfMap[key].totalHours += Number(req.hours ?? 0);
           if (req.date && !epfMap[key].dates.includes(req.date)) {
             epfMap[key].dates.push(req.date);
           }

@@ -6,8 +6,8 @@ const dotRequestSchema = new mongoose.Schema({
   requesterName: { type: String, required: true },
   department: { type: String, required: true },
   date: { type: String, required: true }, // e.g., '2026-10-12'
-  shift: { type: String, default: 'SHIFT A' },
-  hours: { type: Number, default: 4 },
+  shift: { type: String, default: 'Shift A' },
+  hours: { type: Number, default: 0 },
   reason: { type: String, default: '' },
   employees: [{
     epfNo: { type: String, required: true },
