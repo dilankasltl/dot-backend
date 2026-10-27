@@ -32,8 +32,8 @@ const dotRequestSchema = new mongoose.Schema({
     remarks: { type: String, default: '' }
   },
   finalApprover: {
-    username: { type: String, default: 'Vinod' },
-    name: { type: String, default: 'Mr. Vinod' },
+    username: { type: String, default: 'Vinod / Niranjan' },
+    name: { type: String, default: 'Mr. Vinod / Mr. Niranjan' },
     status: { 
       type: String, 
       enum: ['PENDING', 'APPROVED', 'REJECTED'], 

@@ -180,7 +180,7 @@ const usersData = [
     username: 'Niranjan',
     password: 'Niranjan@123',
     name: 'Mr. Niranjan',
-    role: 'viewer',
+    role: 'approver_final',
     canViewAllPending: true,
     canViewCharts: true
   }

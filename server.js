@@ -647,8 +647,8 @@ app.post('/api/requests', async (req, res) => {
         remarks: ''
       },
       finalApprover: {
-        username: 'Vinod',
-        name: 'Mr. Vinod',
+        username: 'Vinod / Niranjan',
+        name: 'Mr. Vinod / Mr. Niranjan',
         status: 'PENDING',
         remarks: ''
       },
@@ -840,8 +840,8 @@ app.get('/api/requests', async (req, res) => {
       });
     }
 
-    if (user.role === 'viewer') {
-      // Plant-wide Live Monitoring & Read-Only Audit (Mr. Nimesh, Mr. Niranjan)
+    if (user.role === 'viewer' && user.username !== 'Niranjan') {
+      // Plant-wide Live Monitoring & Read-Only Audit (Mr. Nimesh)
       const allPending = await DotRequest.find({
         status: { $in: ['PENDING_L1', 'PENDING_FINAL'] },
         isDeleted: false,
@@ -859,8 +859,8 @@ app.get('/api/requests', async (req, res) => {
       });
     }
 
-    if (user.role === 'approver_final') {
-      // Mr. Vinod: Final Authority
+    if (user.role === 'approver_final' || user.username === 'Vinod' || user.username === 'Niranjan') {
+      // Final Authority (Mr. Vinod / Mr. Niranjan)
       const actionable = await DotRequest.find({
         status: 'PENDING_FINAL',
         isDeleted: false,
@@ -945,22 +945,26 @@ app.post('/api/requests/:id/final-action', async (req, res) => {
     }
 
     const user = await User.findOne({ username });
-    if (!user || user.role !== 'approver_final') {
-      return res.status(403).json({ error: 'Only Final Approver (Mr. Vinod) can perform this action' });
+    if (!user || (user.role !== 'approver_final' && user.username !== 'Vinod' && user.username !== 'Niranjan')) {
+      return res.status(403).json({ error: 'Only Final Approver (Mr. Vinod or Mr. Niranjan) can perform this action' });
     }
+
+    const approverName = user.name || (user.username === 'Niranjan' ? 'Mr. Niranjan' : 'Mr. Vinod');
 
     if (action === 'APPROVE') {
       request.status = 'APPROVED';
       request.finalApprover.status = 'APPROVED';
-      request.finalApprover.name = 'Mr. Vinod';
+      request.finalApprover.username = user.username;
+      request.finalApprover.name = approverName;
       request.finalApprover.actionAt = new Date();
-      request.finalApprover.remarks = remarks || 'Final Approval Authorized by Mr. Vinod';
+      request.finalApprover.remarks = remarks || `Final Approval Authorized by ${approverName}`;
     } else if (action === 'REJECT') {
       request.status = 'REJECTED';
       request.finalApprover.status = 'REJECTED';
-      request.finalApprover.name = 'Mr. Vinod';
+      request.finalApprover.username = user.username;
+      request.finalApprover.name = approverName;
       request.finalApprover.actionAt = new Date();
-      request.finalApprover.remarks = remarks || 'Rejected by Mr. Vinod';
+      request.finalApprover.remarks = remarks || `Rejected by ${approverName}`;
     } else {
       return res.status(400).json({ error: 'Invalid action. Must be APPROVE or REJECT' });
     }
@@ -1006,19 +1010,22 @@ app.post('/api/requests/batch-action', async (req, res) => {
         }
         await request.save();
         updated.push(request);
-      } else if (stage === 'final' && request.status === 'PENDING_FINAL' && user.role === 'approver_final') {
+      } else if (stage === 'final' && request.status === 'PENDING_FINAL' && (user.role === 'approver_final' || user.username === 'Vinod' || user.username === 'Niranjan')) {
+        const approverName = user.name || (user.username === 'Niranjan' ? 'Mr. Niranjan' : 'Mr. Vinod');
         if (action === 'APPROVE') {
           request.status = 'APPROVED';
           request.finalApprover.status = 'APPROVED';
-          request.finalApprover.name = 'Mr. Vinod';
+          request.finalApprover.username = user.username;
+          request.finalApprover.name = approverName;
           request.finalApprover.actionAt = new Date();
-          request.finalApprover.remarks = 'Batch Final Approved by Mr. Vinod';
+          request.finalApprover.remarks = `Batch Final Approved by ${approverName}`;
         } else {
           request.status = 'REJECTED';
           request.finalApprover.status = 'REJECTED';
-          request.finalApprover.name = 'Mr. Vinod';
+          request.finalApprover.username = user.username;
+          request.finalApprover.name = approverName;
           request.finalApprover.actionAt = new Date();
-          request.finalApprover.remarks = 'Batch Final Rejected by Mr. Vinod';
+          request.finalApprover.remarks = `Batch Final Rejected by ${approverName}`;
         }
         await request.save();
         updated.push(request);
